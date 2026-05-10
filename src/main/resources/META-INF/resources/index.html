@@ -1,0 +1,1529 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>gcsee-jma</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <!-- Chart.js v4.4.4 bundled locally under /vendor so the page works offline. -->
+    <script src="vendor/chart.umd.js"></script>
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+            margin: 0;
+            padding: 24px;
+            max-width: 1200px;
+            margin: 0 auto;
+            color: #1f2328;
+        }
+        /* Shift body right of the sidebar once analyze() reveals it.
+           240 px sidebar + 24 px gutter; max-width also widens so the
+           visible content area stays comparable to the no-rail case. */
+        body.with-sidebar {
+            margin-left: 0;
+            padding-left: 264px;
+            max-width: calc(1200px + 240px);
+        }
+        /* ---------------------- Sidebar ---------------------- */
+        .sidebar {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 240px;
+            height: 100vh;
+            overflow-y: auto;
+            background: #f6f8fa;
+            border-right: 1px solid #d0d7de;
+            padding: 16px 14px;
+            z-index: 10;
+            font-size: 13px;
+            color: #1f2328;
+        }
+        .sidebar.hidden { display: none; }
+        .sidebar .sidebar-brand {
+            font-size: 14px;
+            font-weight: 700;
+            margin-bottom: 12px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid #d0d7de;
+        }
+        /* Top-level group: Summary, Analytics, Charts. Collapsible. */
+        .sidebar-group { margin-bottom: 12px; }
+        .sidebar-group-header {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 11px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: #1f2328;
+            cursor: pointer;
+            user-select: none;
+            padding: 4px 0;
+        }
+        .sidebar-group-header .triangle {
+            font-size: 9px;
+            width: 10px;
+            display: inline-block;
+            color: #656d76;
+        }
+        .sidebar-group.collapsed .sidebar-group-header .triangle { transform: rotate(-90deg); }
+        .sidebar-group.collapsed .sidebar-group-body { display: none; }
+        .sidebar-group-body { padding-left: 4px; }
+        /* Chart subsection: Heap Usage, Region Usage, etc. Collapsible. */
+        .sidebar-subsection { margin: 4px 0 6px 0; }
+        .sidebar-subsection-header {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 12px;
+            font-weight: 600;
+            color: #1f2328;
+            cursor: pointer;
+            user-select: none;
+            padding: 3px 0;
+        }
+        .sidebar-subsection-header .triangle {
+            font-size: 9px;
+            width: 10px;
+            display: inline-block;
+            color: #656d76;
+        }
+        .sidebar-subsection.collapsed .sidebar-subsection-header .triangle { transform: rotate(-90deg); }
+        .sidebar-subsection.collapsed .sidebar-subsection-body { display: none; }
+        .sidebar-subsection-body { padding-left: 14px; }
+        /* Inner-Analytics dim sub-headings (group labels — not collapsible). */
+        .sidebar-analytic-group {
+            font-size: 11px;
+            color: #656d76;
+            margin: 6px 0 2px 0;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+        }
+        /* Leaf items — chart entries and analytic findings. */
+        .sidebar-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 3px 6px 3px 8px;
+            cursor: pointer;
+            border-radius: 3px;
+            color: #1f2328;
+            line-height: 1.35;
+        }
+        .sidebar-item:hover { background: #eaeef2; }
+        .sidebar-item.active {
+            background: #d0d7de;
+            font-weight: 600;
+        }
+        .sidebar-item.disabled {
+            color: #8c959f;
+            cursor: default;
+        }
+        .sidebar-item.disabled:hover { background: transparent; }
+        .sidebar-item .number {
+            color: #656d76;
+            font-variant-numeric: tabular-nums;
+            min-width: 28px;
+            flex-shrink: 0;
+        }
+        .sidebar-item .label {
+            flex: 1;
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        /* Severity dots for analytic findings. */
+        .severity-dot {
+            display: inline-block;
+            width: 9px;
+            height: 9px;
+            border-radius: 50%;
+            flex-shrink: 0;
+        }
+        .severity-dot.ok          { background: #1a7f37; }
+        .severity-dot.concerning  { background: #bf8700; }
+        .severity-dot.significant { background: #cf222e; }
+        header { display: flex; align-items: baseline; gap: 16px; margin-bottom: 16px; }
+        header h1 { margin: 0; font-size: 20px; font-weight: 600; }
+        header .subtitle { color: #656d76; font-size: 13px; }
+        .upload-bar {
+            display: flex; gap: 12px; align-items: center;
+            padding: 12px 16px;
+            background: #f6f8fa;
+            border: 1px solid #d0d7de;
+            border-radius: 6px;
+            margin-bottom: 16px;
+        }
+        .upload-bar input[type=file] { flex: 1; }
+        .upload-bar button {
+            padding: 6px 14px;
+            background: #1f883d;
+            color: white;
+            border: 0;
+            border-radius: 6px;
+            font-weight: 500;
+            cursor: pointer;
+        }
+        .upload-bar button:disabled { background: #94d3a2; cursor: not-allowed; }
+        .status {
+            font-size: 13px;
+            color: #656d76;
+            min-height: 20px;
+            margin-bottom: 12px;
+        }
+        .status.error { color: #cf222e; }
+        .chart-card {
+            border: 1px solid #d0d7de;
+            border-radius: 6px;
+            margin-bottom: 16px;
+            background: white;
+        }
+        .chart-card h2 {
+            margin: 0;
+            padding: 10px 16px;
+            font-size: 14px;
+            font-weight: 600;
+            border-bottom: 1px solid #d0d7de;
+            background: #f6f8fa;
+        }
+        .chart-card .chart-body {
+            position: relative;
+            height: 360px;
+            padding: 12px;
+        }
+        .chart-card .empty-note {
+            color: #656d76;
+            font-style: italic;
+            padding: 48px 16px;
+            text-align: center;
+        }
+        /* Summary card: same outer frame as charts, but body is tabular. */
+        .summary-card .summary-body {
+            padding: 12px 16px 16px 16px;
+        }
+        .summary-card .summary-headline {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            gap: 4px 24px;
+            margin-bottom: 16px;
+            padding: 10px 12px;
+            background: #f6f8fa;
+            border: 1px solid #d0d7de;
+            border-radius: 6px;
+            font-size: 13px;
+        }
+        .summary-card .summary-headline .hdr-label {
+            color: #656d76;
+            display: inline-block;
+            min-width: 180px;
+        }
+        .summary-card .summary-headline .hdr-value {
+            font-variant-numeric: tabular-nums;
+            font-weight: 500;
+        }
+        .summary-card h3 {
+            font-size: 13px;
+            font-weight: 600;
+            margin: 12px 0 6px 0;
+            color: #24292f;
+        }
+        .summary-card table {
+            border-collapse: collapse;
+            width: 100%;
+            font-size: 13px;
+            margin-bottom: 12px;
+        }
+        .summary-card th, .summary-card td {
+            border: 1px solid #d0d7de;
+            padding: 4px 8px;
+            font-variant-numeric: tabular-nums;
+        }
+        .summary-card th {
+            background: #f6f8fa;
+            font-weight: 600;
+            text-align: left;
+        }
+        .summary-card td.num   { text-align: right; }
+        .summary-card td.empty { color: #8c959f; text-align: right; }
+        .summary-card ul.notes {
+            margin: 4px 0 0 0;
+            padding-left: 20px;
+            font-size: 13px;
+            color: #24292f;
+        }
+        .summary-card ul.notes li { margin: 2px 0; }
+        /* Analytics card — list of findings grouped by feature area, each
+           with a severity badge and optional collapsible details. */
+        .analytics-card .analytics-body {
+            padding: 12px 16px 16px 16px;
+        }
+        .analytics-card h3 {
+            font-size: 13px;
+            font-weight: 600;
+            margin: 12px 0 6px 0;
+            color: #24292f;
+        }
+        .analytics-card .finding {
+            border: 1px solid #d0d7de;
+            border-radius: 6px;
+            padding: 8px 12px;
+            margin-bottom: 6px;
+            font-size: 13px;
+            background: #fff;
+        }
+        .analytics-card .finding-row {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .analytics-card .finding-row .badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            white-space: nowrap;
+        }
+        .analytics-card .badge.ok          { background: #dafbe1; color: #1a7f37; }
+        .analytics-card .badge.concerning  { background: #fff8c5; color: #9a6700; }
+        .analytics-card .badge.significant { background: #ffebe9; color: #cf222e; }
+        .analytics-card .finding-title {
+            font-weight: 600;
+            min-width: 220px;
+        }
+        .analytics-card .finding-message {
+            color: #24292f;
+            flex: 1;
+        }
+        .analytics-card details summary {
+            cursor: pointer;
+            color: #0969da;
+            font-size: 12px;
+            margin-top: 6px;
+        }
+        .analytics-card details > .finding-details {
+            white-space: pre-wrap;
+            margin: 6px 0 0 0;
+            padding: 8px 10px;
+            background: #f6f8fa;
+            border-radius: 4px;
+            font-size: 12px;
+            color: #24292f;
+        }
+        /* Top-level page sections — Summary, Analytics, Charts. All
+           three are .hidden in markup so the home page (no log loaded)
+           shows only the upload bar and status. analyze() reveals them
+           after a successful upload + fetch. */
+        .page-section {
+            margin-bottom: 8px;
+        }
+        .page-section > .page-section-heading {
+            font-size: 22px;
+            font-weight: 700;
+            margin: 32px 0 16px 0;
+            padding: 0 2px 8px 2px;
+            border-bottom: 3px solid #1f2328;
+            color: #1f2328;
+        }
+        /* Chart-section subsection — Heap Usage, Region Usage, etc. */
+        .chart-subsection {
+            margin-top: 28px;
+        }
+        .chart-subsection > .subsection-heading {
+            font-size: 16px;
+            font-weight: 600;
+            margin: 0 0 10px 0;
+            padding: 0 2px 6px 2px;
+            border-bottom: 2px solid #d0d7de;
+            color: #1f2328;
+        }
+        /* Cards / subsections / page-sections are hidden when there's
+           nothing to show — at home-page load all three page-sections
+           start hidden and reveal after the first successful analyze. */
+        .chart-card.hidden,
+        .chart-subsection.hidden,
+        .page-section.hidden {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <nav class="sidebar hidden" id="sidebar" aria-label="Page navigation">
+        <div class="sidebar-brand">gcsee-jma</div>
+        <div class="sidebar-content"></div>
+    </nav>
+
+    <header>
+        <h1>gcsee-jma</h1>
+        <span class="subtitle">upload a GC log to see it charted</span>
+    </header>
+
+    <div class="upload-bar">
+        <input type="file" id="file" accept=".log,.txt,.gz,*">
+        <button id="go" type="button">Analyze</button>
+    </div>
+    <div class="status" id="status">Pick a GC log and hit Analyze.</div>
+
+    <section class="page-section hidden" id="section-summary">
+        <div class="chart-card summary-card">
+            <h2>Log summary</h2>
+            <div class="summary-body" id="summary"></div>
+        </div>
+    </section>
+
+    <section class="page-section hidden" id="section-analytics">
+        <div class="chart-card analytics-card">
+            <h2>Analytics</h2>
+            <div class="analytics-body" id="analytics"></div>
+        </div>
+    </section>
+
+    <section class="page-section hidden" id="section-charts">
+        <h2 class="page-section-heading">Charts</h2>
+
+    <section class="chart-subsection" data-section="heap-usage">
+        <h2 class="subsection-heading">Heap Usage</h2>
+
+        <div class="chart-card">
+            <h2>Heap size &amp; occupancy after collection</h2>
+            <div class="chart-body"><canvas id="heap-occupancy"></canvas></div>
+        </div>
+
+        <div class="chart-card">
+            <h2>Heap size &amp; occupancy before collection</h2>
+            <div class="chart-body"><canvas id="heap-occupancy-before"></canvas></div>
+        </div>
+
+        <div class="chart-card">
+            <h2>% heap occupancy before collection</h2>
+            <div class="chart-body"><canvas id="heap-occupancy-before-percent"></canvas></div>
+        </div>
+
+        <div class="chart-card">
+            <h2>% heap occupancy after collection</h2>
+            <div class="chart-body"><canvas id="heap-occupancy-after-percent"></canvas></div>
+        </div>
+
+        <div class="chart-card">
+            <h2>Metaspace size &amp; occupancy after collection</h2>
+            <div class="chart-body"><canvas id="metaspace-occupancy"></canvas></div>
+        </div>
+    </section>
+
+    <section class="chart-subsection" data-section="region-usage">
+        <h2 class="subsection-heading">Region Usage</h2>
+
+        <div class="chart-card">
+            <h2>G1 regions before collection</h2>
+            <div class="chart-body"><canvas id="g1-regions-before"></canvas></div>
+        </div>
+
+        <div class="chart-card">
+            <h2>G1 regions after collection</h2>
+            <div class="chart-body"><canvas id="g1-regions-after"></canvas></div>
+        </div>
+
+        <div class="chart-card">
+            <h2>G1 regions before collection (% of total)</h2>
+            <div class="chart-body"><canvas id="g1-regions-before-percent"></canvas></div>
+        </div>
+
+        <div class="chart-card">
+            <h2>G1 regions after collection (% of total)</h2>
+            <div class="chart-body"><canvas id="g1-regions-after-percent"></canvas></div>
+        </div>
+    </section>
+
+    <section class="chart-subsection" data-section="heap-churn">
+        <h2 class="subsection-heading">Heap Churn</h2>
+
+        <div class="chart-card">
+            <h2>Allocated between collections</h2>
+            <div class="chart-body"><canvas id="allocation-per-collection"></canvas></div>
+        </div>
+
+        <div class="chart-card">
+            <h2>Application allocation rate</h2>
+            <div class="chart-body"><canvas id="allocation-rate"></canvas></div>
+        </div>
+
+        <div class="chart-card">
+            <h2>Recovered by each collection</h2>
+            <div class="chart-body"><canvas id="recovered"></canvas></div>
+        </div>
+    </section>
+
+    <section class="chart-subsection" data-section="cycle-durations">
+        <h2 class="subsection-heading">Cycle Durations</h2>
+
+        <div class="chart-card">
+            <h2>Stop-the-world pause time</h2>
+            <div class="chart-body"><canvas id="pause-time"></canvas></div>
+        </div>
+
+        <div class="chart-card">
+            <h2>% time in GC over time</h2>
+            <div class="chart-body"><canvas id="percent-time-in-gc"></canvas></div>
+        </div>
+
+        <div class="chart-card">
+            <h2>Concurrent phase durations</h2>
+            <div class="chart-body"><canvas id="concurrent-phase-duration"></canvas></div>
+        </div>
+
+        <div class="chart-card">
+            <h2>Minimum mutator utilization</h2>
+            <div class="chart-body"><canvas id="mmu"></canvas></div>
+        </div>
+
+        <div class="chart-card">
+            <h2>CPU breakouts</h2>
+            <div class="chart-body"><canvas id="cpu-breakouts"></canvas></div>
+        </div>
+    </section>
+
+    <section class="chart-subsection" data-section="phase-times">
+        <h2 class="subsection-heading">Phase Times</h2>
+
+        <div class="chart-card">
+            <h2>G1 phase breakout</h2>
+            <div class="chart-body"><canvas id="g1-phases"></canvas></div>
+        </div>
+
+        <div class="chart-card">
+            <h2>G1 phase breakout (% of pause)</h2>
+            <div class="chart-body"><canvas id="g1-phase-percent"></canvas></div>
+        </div>
+
+        <div class="chart-card">
+            <h2>G1 Pre-Collection sub-phases</h2>
+            <div class="chart-body"><canvas id="g1-pre-collection"></canvas></div>
+        </div>
+
+        <div class="chart-card">
+            <h2>G1 Pre-Collection sub-phases (% of phase)</h2>
+            <div class="chart-body"><canvas id="g1-pre-collection-percent"></canvas></div>
+        </div>
+
+        <div class="chart-card">
+            <h2>G1 Collection sub-phases</h2>
+            <div class="chart-body"><canvas id="g1-collection"></canvas></div>
+        </div>
+
+        <div class="chart-card">
+            <h2>G1 Collection sub-phases (% of phase)</h2>
+            <div class="chart-body"><canvas id="g1-collection-percent"></canvas></div>
+        </div>
+
+        <div class="chart-card">
+            <h2>G1 Post-Collection sub-phases</h2>
+            <div class="chart-body"><canvas id="g1-post-collection"></canvas></div>
+        </div>
+
+        <div class="chart-card">
+            <h2>G1 Post-Collection sub-phases (% of phase)</h2>
+            <div class="chart-body"><canvas id="g1-post-collection-percent"></canvas></div>
+        </div>
+
+        <div class="chart-card">
+            <h2>G1 Other sub-phases</h2>
+            <div class="chart-body"><canvas id="g1-other-collection"></canvas></div>
+        </div>
+
+        <div class="chart-card">
+            <h2>G1 Other sub-phases (% of phase)</h2>
+            <div class="chart-body"><canvas id="g1-other-collection-percent"></canvas></div>
+        </div>
+    </section>
+
+    <section class="chart-subsection" data-section="misc">
+        <h2 class="subsection-heading">Misc</h2>
+
+        <div class="chart-card">
+            <h2>Reference processing count</h2>
+            <div class="chart-body"><canvas id="reference-count"></canvas></div>
+        </div>
+
+        <div class="chart-card">
+            <h2>Reference processing time</h2>
+            <div class="chart-body"><canvas id="reference-time"></canvas></div>
+        </div>
+
+        <div class="chart-card">
+            <h2>Safepoint duration</h2>
+            <div class="chart-body"><canvas id="safepoint-duration"></canvas></div>
+        </div>
+
+        <div class="chart-card">
+            <h2>Safepoint cause counts</h2>
+            <div class="chart-body"><canvas id="safepoint-cause"></canvas></div>
+        </div>
+
+        <div class="chart-card">
+            <h2>GC cause by collection type</h2>
+            <div class="chart-body"><canvas id="gc-cause"></canvas></div>
+        </div>
+    </section>
+
+    <section class="chart-subsection" data-section="tenuring">
+        <h2 class="subsection-heading">Tenuring</h2>
+
+        <div class="chart-card summary-card">
+            <h2>Tenuring distribution summary</h2>
+            <div class="summary-body" id="tenuring-summary"></div>
+        </div>
+
+        <div class="chart-card">
+            <h2>Tenuring distribution</h2>
+            <div class="chart-body"><canvas id="tenuring-volume"></canvas></div>
+        </div>
+
+        <div class="chart-card">
+            <h2>Tenuring over time</h2>
+            <div class="chart-body"><canvas id="tenuring-over-time"></canvas></div>
+        </div>
+
+        <div class="chart-card">
+            <h2>Calculated tenuring thresholds</h2>
+            <div class="chart-body"><canvas id="tenuring-threshold"></canvas></div>
+        </div>
+    </section>
+
+    </section><!-- /page-section section-charts -->
+
+<script>
+(() => {
+    const fileInput = document.getElementById('file');
+    const goBtn     = document.getElementById('go');
+    const statusEl  = document.getElementById('status');
+
+    // Keep chart instances so we can destroy + recreate on re-upload.
+    const charts = { 'heap-occupancy': null, 'pause-time': null, 'allocation-rate': null };
+
+    function setStatus(msg, isError) {
+        statusEl.textContent = msg;
+        statusEl.classList.toggle('error', !!isError);
+    }
+
+    async function upload(file) {
+        const res = await fetch('/sessions', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'text/plain',
+                'X-Filename':   file.name
+            },
+            body: file
+        });
+        if (!res.ok) throw new Error(`upload failed: ${res.status} ${await res.text()}`);
+        return res.json();
+    }
+
+    async function fetchView(sessionId, viewId) {
+        const res = await fetch(`/sessions/${sessionId}/views/${viewId}`);
+        if (!res.ok) throw new Error(`${viewId}: ${res.status} ${await res.text()}`);
+        return res.json();
+    }
+
+    /**
+     * Show or hide the chart-card containing the element with the given id.
+     * Looks up the nearest .chart-card ancestor — works for canvases (chart
+     * views) and summary-body divs (summary-style cards) alike.
+     */
+    function setCardVisibility(elementId, visible) {
+        const card = document.getElementById(elementId)?.closest('.chart-card');
+        if (!card) return;
+        card.classList.toggle('hidden', !visible);
+    }
+
+    /**
+     * After all renders complete, walk each .chart-subsection and hide
+     * the ones whose chart-cards are all empty. Subsections with at
+     * least one visible card stay shown. As a final pass, if every
+     * subsection ends up hidden, hide the Charts page-section too so
+     * the empty heading doesn't dangle below the analytics card.
+     */
+    function hideEmptySubsections() {
+        document.querySelectorAll('.chart-subsection').forEach(section => {
+            const cards = section.querySelectorAll('.chart-card');
+            const visible = Array.from(cards).some(c => !c.classList.contains('hidden'));
+            section.classList.toggle('hidden', !visible);
+        });
+        const chartsSection = document.getElementById('section-charts');
+        if (chartsSection) {
+            const visibleSub = chartsSection.querySelectorAll('.chart-subsection:not(.hidden)');
+            chartsSection.classList.toggle('hidden', visibleSub.length === 0);
+        }
+    }
+
+    /** Reveal Summary, Analytics and Charts after a successful analyze. */
+    function revealResultSections() {
+        document.querySelectorAll('.page-section').forEach(s => s.classList.remove('hidden'));
+        document.body.classList.add('with-sidebar');
+        document.getElementById('sidebar').classList.remove('hidden');
+    }
+
+    // ---------- Sidebar (left rail navigation) ----------
+    // The rail is rebuilt from scratch on every analyze. It walks the
+    // current DOM state — page sections, chart subsections, individual
+    // chart cards — plus the analytics data (for severity dots) to
+    // produce a hierarchical, numbered, click-to-scroll outline that
+    // mirrors what's actually visible on the page. Entries for hidden
+    // chart cards / subsections stay in the rail in a greyed-out
+    // disabled state so the user always sees the tool's full structure.
+
+    let activeObserver = null;
+
+    function buildSidebar(analyticsData) {
+        const root = document.querySelector('#sidebar .sidebar-content');
+        if (!root) return;
+        root.innerHTML = '';
+        addSidebarSummary(root);
+        addSidebarAnalytics(root, analyticsData);
+        addSidebarCharts(root);
+        setupActiveHighlighting();
+    }
+
+    function addSidebarSummary(root) {
+        const section = document.getElementById('section-summary');
+        if (!section) return;
+        const grp = makeGroupSkeleton('Summary', section);
+        const card = section.querySelector('.chart-card');
+        if (card) {
+            grp.body.appendChild(makeItem({
+                label:    'Log summary',
+                target:   card,
+                disabled: card.classList.contains('hidden')
+            }));
+        }
+        root.appendChild(grp.elem);
+    }
+
+    function addSidebarAnalytics(root, data) {
+        const section = document.getElementById('section-analytics');
+        if (!section) return;
+        const grp = makeGroupSkeleton('Analytics', section);
+        const byGroup = data?.byGroup || {};
+        for (const [group, findings] of Object.entries(byGroup)) {
+            const lbl = document.createElement('div');
+            lbl.className = 'sidebar-analytic-group';
+            lbl.textContent = group;
+            grp.body.appendChild(lbl);
+            for (const f of findings) {
+                const key = `${group}::${f.title}`;
+                const target = document.querySelector(
+                        `[data-finding-key="${cssEscapeKey(key)}"]`);
+                grp.body.appendChild(makeItem({
+                    label:    f.title,
+                    target:   target,
+                    severity: (f.impact || 'ok').toLowerCase(),
+                    disabled: !target
+                }));
+            }
+        }
+        root.appendChild(grp.elem);
+    }
+
+    function addSidebarCharts(root) {
+        const section = document.getElementById('section-charts');
+        if (!section) return;
+        const grp = makeGroupSkeleton('Charts', section);
+        section.querySelectorAll('.chart-subsection').forEach((sub, subIdx) => {
+            const subTitle = sub.querySelector('.subsection-heading')?.textContent || '';
+            const subHidden = sub.classList.contains('hidden');
+            const subNum = subIdx + 1;
+            const subSk = makeSubsectionSkeleton(
+                    `${subNum}. ${subTitle}`, sub, subHidden);
+            sub.querySelectorAll('.chart-card').forEach((card, cIdx) => {
+                const cardTitle = card.querySelector('h2')?.textContent || '';
+                subSk.body.appendChild(makeItem({
+                    number:   `${subNum}.${cIdx + 1}`,
+                    label:    cardTitle,
+                    target:   card,
+                    disabled: card.classList.contains('hidden')
+                }));
+            });
+            grp.body.appendChild(subSk.elem);
+        });
+        root.appendChild(grp.elem);
+    }
+
+    function makeGroupSkeleton(label, target) {
+        const elem = document.createElement('div');
+        elem.className = 'sidebar-group';
+        const header = document.createElement('div');
+        header.className = 'sidebar-group-header';
+        const tri = document.createElement('span');
+        tri.className = 'triangle';
+        tri.textContent = '▾'; // ▾
+        header.appendChild(tri);
+        const text = document.createElement('span');
+        text.textContent = label;
+        header.appendChild(text);
+        // Triangle click → toggle collapse only. Anywhere else → scroll
+        // to the target (the page-section heading).
+        header.addEventListener('click', e => {
+            if (tri.contains(e.target)) {
+                elem.classList.toggle('collapsed');
+            } else if (target) {
+                target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            }
+        });
+        const body = document.createElement('div');
+        body.className = 'sidebar-group-body';
+        elem.appendChild(header);
+        elem.appendChild(body);
+        return { elem, body };
+    }
+
+    function makeSubsectionSkeleton(label, target, disabled) {
+        const elem = document.createElement('div');
+        elem.className = 'sidebar-subsection';
+        const header = document.createElement('div');
+        header.className = 'sidebar-subsection-header';
+        const tri = document.createElement('span');
+        tri.className = 'triangle';
+        tri.textContent = '▾';
+        header.appendChild(tri);
+        const text = document.createElement('span');
+        text.textContent = label;
+        text.style.flex = '1';
+        text.style.overflow = 'hidden';
+        text.style.textOverflow = 'ellipsis';
+        text.style.whiteSpace = 'nowrap';
+        if (disabled) text.style.color = '#8c959f';
+        header.appendChild(text);
+        header.addEventListener('click', e => {
+            if (tri.contains(e.target)) {
+                elem.classList.toggle('collapsed');
+            } else if (!disabled && target) {
+                target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            }
+        });
+        const body = document.createElement('div');
+        body.className = 'sidebar-subsection-body';
+        elem.appendChild(header);
+        elem.appendChild(body);
+        return { elem, body };
+    }
+
+    function makeItem({ number, label, target, disabled, severity }) {
+        const elem = document.createElement('div');
+        elem.className = 'sidebar-item';
+        if (disabled) elem.classList.add('disabled');
+        if (severity) {
+            const dot = document.createElement('span');
+            dot.className = `severity-dot ${severity}`;
+            elem.appendChild(dot);
+        }
+        if (number) {
+            const numEl = document.createElement('span');
+            numEl.className = 'number';
+            numEl.textContent = number;
+            elem.appendChild(numEl);
+        }
+        const lbl = document.createElement('span');
+        lbl.className = 'label';
+        lbl.textContent = label;
+        elem.title = label; // tooltip when truncated
+        elem.appendChild(lbl);
+        // Stash the target on the DOM node so the IntersectionObserver
+        // can map intersecting elements back to their nav items.
+        elem._target = target;
+        if (!disabled && target) {
+            elem.addEventListener('click', () => {
+                target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            });
+        }
+        return elem;
+    }
+
+    /** CSS.escape with a polyfill fallback for older browsers. */
+    function cssEscapeKey(s) {
+        if (window.CSS && CSS.escape) return CSS.escape(s);
+        return s.replace(/(["\\])/g, '\\$1');
+    }
+
+    /**
+     * Highlight whichever rail item corresponds to the chart-card or
+     * subsection currently nearest the top of the viewport. The
+     * IntersectionObserver's rootMargin pins the "active zone" to a
+     * narrow band 20% from the top of the viewport — that way only one
+     * item is active at a time and it tracks the section the user is
+     * actually reading rather than whatever the topmost on-screen
+     * element happens to be.
+     */
+    function setupActiveHighlighting() {
+        if (activeObserver) activeObserver.disconnect();
+        const items = document.querySelectorAll('.sidebar-item');
+        const map = new Map(); // DOM element → sidebar item
+        items.forEach(it => { if (it._target) map.set(it._target, it); });
+        if (map.size === 0) return;
+        activeObserver = new IntersectionObserver(entries => {
+            const intersecting = entries.filter(e => e.isIntersecting);
+            if (intersecting.length === 0) return;
+            intersecting.sort((a, b) =>
+                    Math.abs(a.boundingClientRect.top)
+                  - Math.abs(b.boundingClientRect.top));
+            const top = intersecting[0].target;
+            document.querySelectorAll('.sidebar-item.active')
+                    .forEach(i => i.classList.remove('active'));
+            const navItem = map.get(top);
+            if (navItem) navItem.classList.add('active');
+        }, {
+            rootMargin: '-20% 0px -65% 0px',
+            threshold: 0
+        });
+        map.forEach((_, target) => activeObserver.observe(target));
+    }
+
+    function render(canvasId, view) {
+        // Wipe any previous chart on this canvas.
+        if (charts[canvasId]) { charts[canvasId].destroy(); charts[canvasId] = null; }
+
+        if (!view || view.status === 'EMPTY' || view.status === 'ERROR' || !view.aggregation) {
+            setCardVisibility(canvasId, false);
+            return;
+        }
+        setCardVisibility(canvasId, true);
+
+        const data    = view.aggregation.data;
+        const datasets = data.series.map(s => ({
+            label:            s.label,
+            data:             s.points.map(p => ({ x: p.t, y: p.y })),
+            backgroundColor:  s.color,
+            borderColor:      s.color,
+            pointRadius:      2.5,
+            pointHoverRadius: 5,
+            showLine:         false
+        }));
+
+        const ctx = document.getElementById(canvasId).getContext('2d');
+        charts[canvasId] = new Chart(ctx, {
+            type: 'scatter',
+            data: { datasets },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                animation: false,
+                parsing: false,
+                scales: {
+                    x: { type: 'linear', title: { display: true, text: data.xAxisLabel } },
+                    y: {
+                        type: 'linear',
+                        title: { display: true, text: data.yAxisLabel },
+                        beginAtZero: true,
+                        // Clamp the percent variants so a tiny rounding error
+                        // (e.g. occupancy/size = 100.05) doesn't push the
+                        // chart's auto-max past 100 and squash the rest of
+                        // the series.
+                        ...(data.yUnit === '%' ? { max: 100 } : {})
+                    }
+                },
+                plugins: {
+                    legend: { position: 'bottom' },
+                    tooltip: {
+                        callbacks: {
+                            label: ctx => {
+                                const s = ctx.dataset.label;
+                                const x = ctx.parsed.x.toFixed(2);
+                                const y = ctx.parsed.y.toFixed(2);
+                                return `${s}: t=${x}s, ${y} ${data.yUnit}`;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    // ---------- Stacked-area rendering (G1 phase time-series) ----------
+    // Handles both the absolute (ms) and percent-of-pause (%) variants —
+    // the only difference is that the percent y-axis is clamped to 100
+    // so a tiny rounding error doesn't redraw the top at 99.7.
+
+    function renderStackedArea(canvasId, view) {
+        if (charts[canvasId]) { charts[canvasId].destroy(); charts[canvasId] = null; }
+
+        if (!view || view.status === 'EMPTY' || view.status === 'ERROR' || !view.aggregation) {
+            setCardVisibility(canvasId, false);
+            return;
+        }
+        setCardVisibility(canvasId, true);
+
+        const data = view.aggregation.data;
+        // Stacked area: one dataset per phase, y values pre-computed as
+        // percentages (summing to ~100 at each x). `fill: '-1'` stacks
+        // against the previous dataset; the first fills from the origin.
+        const datasets = data.series.map((s, i) => ({
+            label:            s.label,
+            data:             data.samples.map(sample => ({ x: sample.t, y: sample.values[i] })),
+            backgroundColor:  s.color,
+            borderColor:      s.color,
+            borderWidth:      0,
+            pointRadius:      0,
+            pointHoverRadius: 3,
+            fill:             i === 0 ? 'origin' : '-1',
+            tension:          0
+        }));
+
+        const ctx = document.getElementById(canvasId).getContext('2d');
+        charts[canvasId] = new Chart(ctx, {
+            type: 'line',
+            data: { datasets },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                animation: false,
+                parsing: false,
+                scales: {
+                    x: { type: 'linear', title: { display: true, text: data.xAxisLabel } },
+                    y: {
+                        stacked: true,
+                        beginAtZero: true,
+                        // Clamp the percent variant so a tiny rounding error
+                        // (totals that add to 99.7 not 100) doesn't squash the
+                        // rest of the chart against the ceiling. The absolute
+                        // variant auto-scales.
+                        ...(data.yUnit === '%' ? { max: 100 } : {}),
+                        title: { display: true, text: data.yAxisLabel }
+                    }
+                },
+                plugins: {
+                    legend: { position: 'bottom' },
+                    tooltip: {
+                        callbacks: {
+                            title: items => `t = ${items[0].parsed.x.toFixed(2)}s`,
+                            label: ctx => `${ctx.dataset.label}: ${ctx.parsed.y.toFixed(1)} ${data.yUnit}`
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    // ---------- Stacked-scatter-with-shading rendering (G1 region counts) ----------
+    // Same input shape as renderStackedArea (StackedBarData with one
+    // sample per event). We piggy-back on Chart.js' native line-chart
+    // stacking (y.stacked: true + fill: '-1'/'origin') so the bands
+    // between consecutive series get the same shaded look as the G1
+    // phase breakout chart, then layer visible scatter points on the
+    // top edge of each band (with a white halo so they stand out
+    // against same-colour fill) so each pause still reads as a column
+    // of dots. borderWidth: 0 hides the polyline that would otherwise
+    // connect successive samples — we want dots, not a line.
+
+    function renderStackedScatter(canvasId, view) {
+        if (charts[canvasId]) { charts[canvasId].destroy(); charts[canvasId] = null; }
+
+        if (!view || view.status === 'EMPTY' || view.status === 'ERROR' || !view.aggregation) {
+            setCardVisibility(canvasId, false);
+            return;
+        }
+        setCardVisibility(canvasId, true);
+
+        const data = view.aggregation.data;
+        const datasets = data.series.map((s, i) => ({
+            label:                s.label,
+            // Raw (un-stacked) values — Chart.js stacks them via y.stacked.
+            data:                 data.samples.map(sample => ({ x: sample.t, y: sample.values[i] })),
+            backgroundColor:      s.color,
+            borderColor:          s.color,
+            borderWidth:          0,
+            pointBackgroundColor: s.color,
+            pointBorderColor:     '#ffffff',
+            pointBorderWidth:     1,
+            pointRadius:          2.5,
+            pointHoverRadius:     5,
+            // Same fill convention as renderStackedArea: first series
+            // fills down to the x-axis, every other series fills down
+            // to the dataset below it.
+            fill:                 i === 0 ? 'origin' : '-1',
+            tension:              0
+        }));
+
+        const ctx = document.getElementById(canvasId).getContext('2d');
+        charts[canvasId] = new Chart(ctx, {
+            type: 'line',
+            data: { datasets },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                animation: false,
+                parsing: false,
+                scales: {
+                    x: { type: 'linear', title: { display: true, text: data.xAxisLabel } },
+                    y: {
+                        stacked: true,
+                        beginAtZero: true,
+                        // Same percent clamp as renderStackedArea: keeps the
+                        // top of the chart at exactly 100 for the % views.
+                        ...(data.yUnit === '%' ? { max: 100 } : {}),
+                        title: { display: true, text: data.yAxisLabel }
+                    }
+                },
+                plugins: {
+                    legend: { position: 'bottom' },
+                    tooltip: {
+                        callbacks: {
+                            title: items => `t = ${items[0].parsed.x.toFixed(2)}s`,
+                            // ctx.parsed.y is the un-stacked value for line
+                            // datasets even when y.stacked is true, so this
+                            // reads as the region type's own count rather
+                            // than the cumulative top-of-stack.
+                            label: ctx => `${ctx.dataset.label}: ${ctx.parsed.y.toFixed(1)} ${data.yUnit}`
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    // ---------- Multi-series scatter rendering (XYSeriesData) ----------
+    // Generic named-series scatter: each series carries its own list of
+    // (x, y) points and its own colour. Used for the three tenuring
+    // chart views. Unlike the heap/pause renderer (which is keyed by
+    // GCCategory), this one accepts arbitrary series counts so the
+    // "bytes at age N" chart can grow with the JVM's
+    // MaxTenuringThreshold without needing palette work in the backend.
+
+    function renderXYScatter(canvasId, view) {
+        if (charts[canvasId]) { charts[canvasId].destroy(); charts[canvasId] = null; }
+
+        if (!view || view.status === 'EMPTY' || view.status === 'ERROR' || !view.aggregation) {
+            setCardVisibility(canvasId, false);
+            return;
+        }
+        setCardVisibility(canvasId, true);
+
+        const data = view.aggregation.data;
+        const datasets = data.series.map(s => ({
+            label:            s.label,
+            data:             s.points.map(p => ({ x: p.x, y: p.y })),
+            backgroundColor:  s.color,
+            borderColor:      s.color,
+            // Chart.js per-dataset marker hint — falls back to the
+            // default circle when the backend doesn't supply one.
+            pointStyle:       s.pointStyle || 'circle',
+            pointRadius:      2.5,
+            pointHoverRadius: 5,
+            showLine:         false
+        }));
+
+        const ctx = document.getElementById(canvasId).getContext('2d');
+        charts[canvasId] = new Chart(ctx, {
+            type: 'scatter',
+            data: { datasets },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                animation: false,
+                parsing: false,
+                scales: {
+                    x: { type: 'linear', title: { display: true, text: data.xAxisLabel } },
+                    y: { type: 'linear', title: { display: true, text: data.yAxisLabel },
+                         beginAtZero: true,
+                         // Same %-clamp the scatter renderer uses; phase
+                         // percent variants need it.
+                         ...(data.yUnit === '%' ? { max: 100 } : {}) }
+                },
+                plugins: {
+                    legend: { position: 'bottom' },
+                    tooltip: {
+                        callbacks: {
+                            label: ctx => {
+                                const s = ctx.dataset.label;
+                                const x = ctx.parsed.x.toFixed(2);
+                                const y = ctx.parsed.y.toLocaleString(undefined,
+                                            { maximumFractionDigits: 2 });
+                                return data.yUnit
+                                       ? `${s}: x=${x}, ${y} ${data.yUnit}`
+                                       : `${s}: x=${x}, ${y}`;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    // ---------- Categorical stacked-bar rendering (GC cause histogram) ----------
+    // Discrete x-axis (one slot per GC type), one stacked bar per slot,
+    // each segment a count for a given cause. Same rendering shape as
+    // Censum's GCCausePanel (JFreeChart createStackedBarChart).
+
+    function renderCategoryStackedBar(canvasId, view) {
+        if (charts[canvasId]) { charts[canvasId].destroy(); charts[canvasId] = null; }
+
+        if (!view || view.status === 'EMPTY' || view.status === 'ERROR' || !view.aggregation) {
+            setCardVisibility(canvasId, false);
+            return;
+        }
+        setCardVisibility(canvasId, true);
+
+        const data    = view.aggregation.data;
+        const labels  = data.bars.map(b => b.category);
+        const datasets = data.series.map((s, i) => ({
+            label:           s.label,
+            data:            data.bars.map(b => b.values[i]),
+            backgroundColor: s.color,
+            borderColor:     s.color,
+            borderWidth:     0,
+            stack:           'gc-cause'
+        }));
+
+        const ctx = document.getElementById(canvasId).getContext('2d');
+        charts[canvasId] = new Chart(ctx, {
+            type: 'bar',
+            data: { labels, datasets },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                animation: false,
+                scales: {
+                    x: { stacked: true, title: { display: true, text: data.xAxisLabel } },
+                    y: { stacked: true, beginAtZero: true,
+                         ticks: { precision: 0 },
+                         title: { display: true, text: data.yAxisLabel } }
+                },
+                plugins: {
+                    legend: { position: 'bottom' },
+                    tooltip: {
+                        callbacks: {
+                            title: items => items[0].label,
+                            label: ctx => {
+                                const v = ctx.parsed.y;
+                                if (!v) return null; // hide zero stack segments
+                                return `${ctx.dataset.label}: ${v.toLocaleString()} ${data.yUnit}`;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    // ---------- Analytics rendering ----------
+    // Bucketed list of findings: one section per feature area (group),
+    // each finding rendered as a single row with a severity badge, a
+    // title, the one-line message, and optional details collapsed
+    // behind a "Details" disclosure. The backend ships the data
+    // pre-grouped via aggregation.data.byGroup (a Map<String, List>),
+    // so the frontend just iterates without having to bucket itself.
+
+    function renderAnalytics(view) {
+        const host = document.getElementById('analytics');
+        host.innerHTML = '';
+
+        if (!view || view.status === 'EMPTY' || view.status === 'ERROR' || !view.aggregation) {
+            const note = document.createElement('div');
+            note.className = 'empty-note';
+            note.textContent = view?.message || `No analytics (${view?.status ?? 'n/a'}).`;
+            host.appendChild(note);
+            return;
+        }
+
+        const byGroup = view.aggregation.data.byGroup || {};
+        const groups = Object.keys(byGroup);
+        if (groups.length === 0) {
+            const note = document.createElement('div');
+            note.className = 'empty-note';
+            note.textContent = 'No analytics produced for this log.';
+            host.appendChild(note);
+            return;
+        }
+
+        for (const group of groups) {
+            const h = document.createElement('h3');
+            h.textContent = group;
+            host.appendChild(h);
+
+            for (const f of byGroup[group]) {
+                const row = document.createElement('div');
+                row.className = 'finding';
+                // Anchor key for the sidebar's "scroll to this finding"
+                // affordance. Same key shape both sides use.
+                row.dataset.findingKey = `${group}::${f.title}`;
+
+                const top = document.createElement('div');
+                top.className = 'finding-row';
+
+                const badge = document.createElement('span');
+                badge.className = 'badge ' + (f.impact || 'ok').toLowerCase();
+                badge.textContent = f.impact || 'OK';
+
+                const title = document.createElement('span');
+                title.className = 'finding-title';
+                title.textContent = f.title;
+
+                const msg = document.createElement('span');
+                msg.className = 'finding-message';
+                msg.textContent = f.message;
+
+                top.appendChild(badge);
+                top.appendChild(title);
+                top.appendChild(msg);
+                row.appendChild(top);
+
+                if (f.details && f.details.trim()) {
+                    const det = document.createElement('details');
+                    const sum = document.createElement('summary');
+                    sum.textContent = 'Details';
+                    det.appendChild(sum);
+                    const body = document.createElement('div');
+                    body.className = 'finding-details';
+                    body.textContent = f.details;
+                    det.appendChild(body);
+                    row.appendChild(det);
+                }
+                host.appendChild(row);
+            }
+        }
+    }
+
+    // ---------- Summary rendering ----------
+
+    function formatNumber(value, format) {
+        if (value === null || value === undefined || Number.isNaN(value)) return '';
+        switch (format) {
+            case 'int':      return Math.round(value).toLocaleString();
+            case 'decimal1': return value.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+            case 'decimal2': return value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+            case 'decimal3': return value.toLocaleString(undefined, { minimumFractionDigits: 3, maximumFractionDigits: 3 });
+            default:         return value.toLocaleString(undefined, { maximumFractionDigits: 2 });
+        }
+    }
+
+    function formatCell(value, column) {
+        const num = formatNumber(value, column.format);
+        if (!num) return { text: '—', empty: true };
+        return { text: column.unit ? `${num} ${column.unit}` : num, empty: false };
+    }
+
+    function renderSummary(hostId, view) {
+        const host = document.getElementById(hostId);
+        host.innerHTML = '';
+        // Cards living inside a .chart-subsection (e.g. Tenuring summary)
+        // hide entirely on empty data; the always-shown Log Summary card
+        // sits outside any subsection and keeps the empty-note fallback.
+        const inSubsection = host.closest('.chart-card')?.closest('.chart-subsection');
+        if (!view || view.status === 'EMPTY' || view.status === 'ERROR' || !view.aggregation) {
+            if (inSubsection) {
+                setCardVisibility(hostId, false);
+                return;
+            }
+            const note = document.createElement('div');
+            note.className = 'empty-note';
+            note.textContent = view?.message || `No summary (${view?.status ?? 'n/a'}).`;
+            host.appendChild(note);
+            return;
+        }
+        if (inSubsection) setCardVisibility(hostId, true);
+
+        const data = view.aggregation.data;
+
+        // Headline scalars: two-column grid of "Label: Value unit" cells.
+        if (data.headline && data.headline.length) {
+            const hdr = document.createElement('div');
+            hdr.className = 'summary-headline';
+            for (const s of data.headline) {
+                const row = document.createElement('div');
+                const label = document.createElement('span');
+                label.className = 'hdr-label';
+                label.textContent = s.label;
+                const value = document.createElement('span');
+                value.className = 'hdr-value';
+                const num = formatNumber(s.value, s.format);
+                value.textContent = s.unit ? `${num} ${s.unit}` : num;
+                row.appendChild(label);
+                row.appendChild(value);
+                hdr.appendChild(row);
+            }
+            host.appendChild(hdr);
+        }
+
+        // Tables: one per entry in data.tables[], each self-describing.
+        for (const t of (data.tables || [])) {
+            const h = document.createElement('h3');
+            h.textContent = t.title;
+            host.appendChild(h);
+
+            const table = document.createElement('table');
+            const thead = document.createElement('thead');
+            const thr = document.createElement('tr');
+            const typeTh = document.createElement('th');
+            typeTh.textContent = 'Type';
+            thr.appendChild(typeTh);
+            for (const c of t.columns) {
+                const th = document.createElement('th');
+                th.style.textAlign = (c.align === 'right') ? 'right' : 'left';
+                th.textContent = c.unit ? `${c.label} (${c.unit})` : c.label;
+                thr.appendChild(th);
+            }
+            thead.appendChild(thr);
+            table.appendChild(thead);
+
+            const tbody = document.createElement('tbody');
+            for (const r of t.rows) {
+                const tr = document.createElement('tr');
+                const td0 = document.createElement('td');
+                td0.textContent = r.label || r.key;
+                tr.appendChild(td0);
+                for (const c of t.columns) {
+                    const td = document.createElement('td');
+                    const v = r.cells ? r.cells[c.key] : undefined;
+                    const cell = formatCell(v, c);
+                    td.className = cell.empty ? 'empty' : 'num';
+                    td.textContent = cell.text;
+                    tr.appendChild(td);
+                }
+                tbody.appendChild(tr);
+            }
+            table.appendChild(tbody);
+            host.appendChild(table);
+        }
+
+        // Notes: bulleted list of (label, count) at the bottom.
+        if (data.notes && data.notes.length) {
+            const h = document.createElement('h3');
+            h.textContent = 'Notes';
+            host.appendChild(h);
+            const ul = document.createElement('ul');
+            ul.className = 'notes';
+            for (const n of data.notes) {
+                const li = document.createElement('li');
+                li.textContent = `${n.label}: ${n.count.toLocaleString()}`;
+                ul.appendChild(li);
+            }
+            host.appendChild(ul);
+        }
+    }
+
+    async function analyze() {
+        const file = fileInput.files[0];
+        if (!file) { setStatus('Pick a GC log first.', true); return; }
+
+        goBtn.disabled = true;
+        setStatus(`Uploading ${file.name} (${Math.round(file.size / 1024)} KB)…`);
+        try {
+            const { id } = await upload(file);
+            setStatus(`Parsed. Session ${id}. Loading views…`);
+            // The home page hides Summary, Analytics, and Charts until
+            // the first analyze succeeds; reveal them now (individual
+            // chart cards / subsections still hide on empty data).
+            revealResultSections();
+            const [heap, heapBefore, heapBeforePct, heapAfterPct,
+                   meta, pause, pctTimeInGc, mmu, concurrentPhase, cpuBreakouts,
+                   alloc, allocPerColl, recovered,
+                   summary, g1Phases, g1PhasePct,
+                   g1Pre, g1PrePct, g1Coll, g1CollPct,
+                   g1Post, g1PostPct, g1Other, g1OtherPct,
+                   g1RegBefore, g1RegAfter, g1RegBeforePct, g1RegAfterPct,
+                   tenuringSummary, tenuringVolume, tenuringThreshold, tenuringOverTime,
+                   gcCause, refCount, refTime, safepointDur, safepointCause,
+                   analytics] = await Promise.all([
+                fetchView(id, 'heap-occupancy'),
+                fetchView(id, 'heap-occupancy-before'),
+                fetchView(id, 'heap-occupancy-before-percent'),
+                fetchView(id, 'heap-occupancy-after-percent'),
+                fetchView(id, 'metaspace-occupancy'),
+                fetchView(id, 'pause-time'),
+                fetchView(id, 'percent-time-in-gc'),
+                fetchView(id, 'mmu'),
+                fetchView(id, 'concurrent-phase-duration'),
+                fetchView(id, 'cpu-breakouts'),
+                fetchView(id, 'allocation-rate'),
+                fetchView(id, 'allocation-per-collection'),
+                fetchView(id, 'recovered'),
+                fetchView(id, 'summary'),
+                fetchView(id, 'g1-phases'),
+                fetchView(id, 'g1-phase-percent'),
+                fetchView(id, 'g1-pre-collection'),
+                fetchView(id, 'g1-pre-collection-percent'),
+                fetchView(id, 'g1-collection'),
+                fetchView(id, 'g1-collection-percent'),
+                fetchView(id, 'g1-post-collection'),
+                fetchView(id, 'g1-post-collection-percent'),
+                fetchView(id, 'g1-other-collection'),
+                fetchView(id, 'g1-other-collection-percent'),
+                fetchView(id, 'g1-regions-before'),
+                fetchView(id, 'g1-regions-after'),
+                fetchView(id, 'g1-regions-before-percent'),
+                fetchView(id, 'g1-regions-after-percent'),
+                fetchView(id, 'tenuring-summary'),
+                fetchView(id, 'tenuring-volume'),
+                fetchView(id, 'tenuring-threshold'),
+                fetchView(id, 'tenuring-over-time'),
+                fetchView(id, 'gc-cause'),
+                fetchView(id, 'reference-count'),
+                fetchView(id, 'reference-time'),
+                fetchView(id, 'safepoint-duration'),
+                fetchView(id, 'safepoint-cause'),
+                fetchView(id, 'analytics')
+            ]);
+            render('heap-occupancy',                heap);
+            render('heap-occupancy-before',         heapBefore);
+            render('heap-occupancy-before-percent', heapBeforePct);
+            render('heap-occupancy-after-percent',  heapAfterPct);
+            render('metaspace-occupancy', meta);
+            render('pause-time',          pause);
+            render('percent-time-in-gc',  pctTimeInGc);
+            renderXYScatter('mmu',                       mmu);
+            renderXYScatter('concurrent-phase-duration', concurrentPhase);
+            renderXYScatter('cpu-breakouts',             cpuBreakouts);
+            render('allocation-rate',     alloc);
+            render('allocation-per-collection', allocPerColl);
+            render('recovered',           recovered);
+            renderStackedArea('g1-phases',                g1Phases);
+            renderStackedArea('g1-phase-percent',         g1PhasePct);
+            renderXYScatter('g1-pre-collection',          g1Pre);
+            renderXYScatter('g1-pre-collection-percent',  g1PrePct);
+            renderXYScatter('g1-collection',              g1Coll);
+            renderXYScatter('g1-collection-percent',      g1CollPct);
+            renderXYScatter('g1-post-collection',         g1Post);
+            renderXYScatter('g1-post-collection-percent', g1PostPct);
+            renderXYScatter('g1-other-collection',        g1Other);
+            renderXYScatter('g1-other-collection-percent', g1OtherPct);
+            renderStackedScatter('g1-regions-before',         g1RegBefore);
+            renderStackedScatter('g1-regions-after',          g1RegAfter);
+            renderStackedScatter('g1-regions-before-percent', g1RegBeforePct);
+            renderStackedScatter('g1-regions-after-percent',  g1RegAfterPct);
+            renderSummary('tenuring-summary',     tenuringSummary);
+            renderXYScatter('tenuring-volume',    tenuringVolume);
+            renderXYScatter('tenuring-threshold', tenuringThreshold);
+            renderXYScatter('tenuring-over-time', tenuringOverTime);
+            renderCategoryStackedBar('gc-cause',  gcCause);
+            renderXYScatter('reference-count',          refCount);
+            renderXYScatter('reference-time',           refTime);
+            renderXYScatter('safepoint-duration',       safepointDur);
+            renderCategoryStackedBar('safepoint-cause', safepointCause);
+            renderSummary('summary', summary);
+            renderAnalytics(analytics);
+            // After every chart renderer has set its card visibility,
+            // hide subsections whose cards are all empty.
+            hideEmptySubsections();
+            // Now that hidden state is settled, build the sidebar from
+            // current DOM + analytics data. Hidden cards / subsections
+            // become greyed-out non-interactive entries.
+            buildSidebar(analytics?.aggregation?.data);
+            setStatus(`Done. Session ${id}.`);
+        } catch (e) {
+            console.error(e);
+            setStatus(e.message || String(e), true);
+        } finally {
+            goBtn.disabled = false;
+        }
+    }
+
+    goBtn.addEventListener('click', analyze);
+    fileInput.addEventListener('change', () => {
+        if (fileInput.files[0]) setStatus(`Selected ${fileInput.files[0].name}. Hit Analyze.`);
+    });
+})();
+</script>
+</body>
+</html>
