@@ -180,14 +180,163 @@
             border-radius: 6px;
             margin-bottom: 16px;
             background: white;
+            position: relative; /* anchor for the expand button */
         }
         .chart-card h2 {
             margin: 0;
-            padding: 10px 16px;
+            padding: 10px 40px 10px 16px; /* right padding leaves room for expand-btn */
             font-size: 14px;
             font-weight: 600;
             border-bottom: 1px solid #d0d7de;
             background: #f6f8fa;
+        }
+        /* Per-card "expand to full screen" button. JS injects one of
+           these into every chart-card on page load. */
+        .chart-expand-btn {
+            position: absolute;
+            top: 6px;
+            right: 10px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 26px;
+            height: 26px;
+            background: transparent;
+            border: 0;
+            border-radius: 4px;
+            color: #656d76;
+            cursor: pointer;
+            line-height: 0;
+            padding: 0;
+        }
+        .chart-expand-btn:hover {
+            background: #eaeef2;
+            color: #1f2328;
+        }
+        /* Full-screen mode. The expanded card pins to the viewport at
+           z-index 100 (above the sidebar at 10), and body scroll is
+           locked while it's active. Esc dismisses; the in-card button
+           also toggles. */
+        body.chart-fullscreen { overflow: hidden; }
+        .chart-card.card-fullscreen {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            margin: 0;
+            border: none;
+            border-radius: 0;
+            z-index: 100;
+            overflow-y: auto;
+        }
+        /* When the sidebar is showing, the expanded card leaves room
+           for it on the left so the rail stays usable for swapping
+           between charts. Without sidebar (home page state), the card
+           covers the entire viewport. */
+        body.with-sidebar .chart-card.card-fullscreen {
+            left: 240px;
+        }
+        /* Chart canvas fills the area below the header in full-screen.
+           h2 is ~38 px tall (10 padding × 2 + ~18 line-height); the
+           per-card zoom bar (~46 px) is subtracted too when present. */
+        .chart-card.card-fullscreen .chart-body {
+            height: calc(100vh - 40px);
+        }
+        .chart-card.card-fullscreen .chart-zoom-bar + .chart-body,
+        .chart-card.card-fullscreen .chart-body:has(+ .chart-zoom-bar) {
+            height: calc(100vh - 40px - 46px);
+        }
+        /* ---------------- Per-card zoom slider (time-axis charts) ---------------- */
+        .chart-zoom-bar {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 8px 14px 10px 14px;
+            border-top: 1px solid #eaecef;
+            background: #fafbfc;
+            font-size: 11px;
+        }
+        .chart-zoom-bar .zoom-label {
+            color: #656d76;
+            font-variant-numeric: tabular-nums;
+            min-width: 64px;
+        }
+        .chart-zoom-bar .zoom-label-left  { text-align: right; }
+        .chart-zoom-bar .zoom-label-right { text-align: left;  }
+        .chart-zoom-bar .zoom-track {
+            position: relative;
+            flex: 1;
+            height: 22px;
+        }
+        /* Background track running across the slider. */
+        .chart-zoom-bar .zoom-track::before {
+            content: '';
+            position: absolute;
+            top: 50%;
+            left: 0; right: 0;
+            height: 4px;
+            margin-top: -2px;
+            background: #d0d7de;
+            border-radius: 2px;
+        }
+        /* Filled segment between the two thumbs — repositioned in JS. */
+        .chart-zoom-bar .zoom-fill {
+            position: absolute;
+            top: 50%;
+            height: 4px;
+            margin-top: -2px;
+            background: #1f6feb;
+            border-radius: 2px;
+            pointer-events: none;
+        }
+        /* Two range inputs stack on top of each other; the track stays
+           visually quiet because the inputs themselves are transparent
+           with pointer-events disabled — only the thumb pseudo-elements
+           receive clicks. */
+        .chart-zoom-bar .zoom-handle {
+            position: absolute;
+            top: 0; left: 0; right: 0;
+            width: 100%;
+            height: 22px;
+            background: transparent;
+            -webkit-appearance: none;
+            appearance: none;
+            pointer-events: none;
+            margin: 0;
+        }
+        .chart-zoom-bar .zoom-handle::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 14px; height: 14px;
+            background: #1f6feb;
+            border: 2px solid #ffffff;
+            border-radius: 50%;
+            box-shadow: 0 0 0 1px #d0d7de;
+            cursor: pointer;
+            pointer-events: auto;
+        }
+        .chart-zoom-bar .zoom-handle::-moz-range-thumb {
+            width: 14px; height: 14px;
+            background: #1f6feb;
+            border: 2px solid #ffffff;
+            border-radius: 50%;
+            box-shadow: 0 0 0 1px #d0d7de;
+            cursor: pointer;
+            pointer-events: auto;
+        }
+        .chart-zoom-bar .zoom-reset {
+            background: #ffffff;
+            border: 1px solid #d0d7de;
+            color: #1f2328;
+            padding: 3px 10px;
+            border-radius: 12px;
+            font-size: 11px;
+            cursor: pointer;
+        }
+        .chart-zoom-bar .zoom-reset:hover {
+            background: #eaeef2;
+        }
+        .chart-zoom-bar .zoom-reset:disabled {
+            color: #8c959f;
+            cursor: default;
+            background: #ffffff;
         }
         .chart-card .chart-body {
             position: relative;
@@ -660,6 +809,308 @@
         }
     }
 
+    // ---------- Global zoom state + per-card slider ----------
+    // One source of truth for the zoom range across all time-axis
+    // charts. Each time-axis chart registers itself by canvas id; when
+    // the user moves a slider on any card, every registered chart
+    // gets the new range applied via Chart.js xAxis min/max. Sliders
+    // in turn re-render their thumb / fill positions when the global
+    // state changes, so they stay in sync. Reset on new log upload.
+
+    const currentZoom = {
+        minSec: 0,         // log start (lower bound)
+        maxSec: 0,         // log end (upper bound)
+        startSec: 0,       // current zoom range start
+        endSec: 0          // current zoom range end
+    };
+    const timeAxisChartIds = new Set();
+    const zoomBars = new Map(); // canvasId -> zoom-bar DOM element
+
+    function resetZoomState() {
+        currentZoom.minSec = 0;
+        currentZoom.maxSec = 0;
+        currentZoom.startSec = 0;
+        currentZoom.endSec = 0;
+        timeAxisChartIds.clear();
+        zoomBars.clear();
+    }
+
+    /**
+     * After all charts have rendered, walk the time-axis set and
+     * derive the union x-range from the chart data. Use that as the
+     * zoom bounds; initialise the zoom range to the same (full) span.
+     * Then push to every chart and every slider.
+     */
+    function computeAndApplyInitialBounds() {
+        let min = Infinity, max = -Infinity;
+        timeAxisChartIds.forEach(id => {
+            const chart = charts[id];
+            if (!chart) return;
+            chart.data.datasets.forEach(ds => {
+                ds.data.forEach(p => {
+                    if (typeof p.x !== 'number') return;
+                    if (p.x < min) min = p.x;
+                    if (p.x > max) max = p.x;
+                });
+            });
+        });
+        if (!isFinite(min) || !isFinite(max) || min === max) {
+            return; // not enough data to set a meaningful range
+        }
+        currentZoom.minSec   = min;
+        currentZoom.maxSec   = max;
+        currentZoom.startSec = min;
+        currentZoom.endSec   = max;
+        applyZoomToAllCharts();
+        zoomBars.forEach(bar => syncZoomBar(bar));
+    }
+
+    function applyZoomToAllCharts() {
+        timeAxisChartIds.forEach(id => {
+            const chart = charts[id];
+            if (chart) applyZoomToChart(chart);
+        });
+    }
+
+    function applyZoomToChart(chart) {
+        if (currentZoom.startSec === currentZoom.endSec) return;
+        chart.options.scales.x.min = currentZoom.startSec;
+        chart.options.scales.x.max = currentZoom.endSec;
+        chart.update('none');
+    }
+
+    /**
+     * Format a duration in seconds as a human-readable label —
+     * "12.3s", "1m 5s", "3h 14m", "2d 7h" — adapting unit by scale.
+     */
+    function formatTime(sec) {
+        if (!isFinite(sec)) return '';
+        if (sec < 60) return sec.toFixed(sec < 1 ? 2 : 1) + 's';
+        if (sec < 3600) {
+            const m = Math.floor(sec / 60);
+            const s = Math.floor(sec - m * 60);
+            return m + 'm ' + s + 's';
+        }
+        if (sec < 86400) {
+            const h = Math.floor(sec / 3600);
+            const m = Math.floor((sec - h * 3600) / 60);
+            return h + 'h ' + m + 'm';
+        }
+        const d = Math.floor(sec / 86400);
+        const h = Math.floor((sec - d * 86400) / 3600);
+        return d + 'd ' + h + 'h';
+    }
+
+    function createZoomBar(canvasId) {
+        const bar = document.createElement('div');
+        bar.className = 'chart-zoom-bar';
+
+        const leftLabel = document.createElement('span');
+        leftLabel.className = 'zoom-label zoom-label-left';
+        leftLabel.textContent = '0s';
+        bar.appendChild(leftLabel);
+
+        const track = document.createElement('div');
+        track.className = 'zoom-track';
+        const fill = document.createElement('div');
+        fill.className = 'zoom-fill';
+        fill.style.left  = '0%';
+        fill.style.width = '100%';
+        const minHandle = document.createElement('input');
+        minHandle.type = 'range';
+        minHandle.className = 'zoom-handle zoom-handle-min';
+        minHandle.step = 'any';
+        minHandle.min = 0; minHandle.max = 100; minHandle.value = 0;
+        const maxHandle = document.createElement('input');
+        maxHandle.type = 'range';
+        maxHandle.className = 'zoom-handle zoom-handle-max';
+        maxHandle.step = 'any';
+        maxHandle.min = 0; maxHandle.max = 100; maxHandle.value = 100;
+        track.appendChild(fill);
+        track.appendChild(minHandle);
+        track.appendChild(maxHandle);
+        bar.appendChild(track);
+
+        const rightLabel = document.createElement('span');
+        rightLabel.className = 'zoom-label zoom-label-right';
+        rightLabel.textContent = '0s';
+        bar.appendChild(rightLabel);
+
+        const reset = document.createElement('button');
+        reset.type = 'button';
+        reset.className = 'zoom-reset';
+        reset.textContent = 'Reset';
+        bar.appendChild(reset);
+
+        // Stash references for syncZoomBar.
+        bar._minHandle  = minHandle;
+        bar._maxHandle  = maxHandle;
+        bar._fill       = fill;
+        bar._leftLabel  = leftLabel;
+        bar._rightLabel = rightLabel;
+        bar._reset      = reset;
+        bar._canvasId   = canvasId;
+
+        // Drag a thumb → update global zoom; broadcast to all charts +
+        // bars. We keep a small min/max separation so the two thumbs
+        // can never cross each other.
+        const MIN_SPAN = 0.01;
+        minHandle.addEventListener('input', () => {
+            let v = parseFloat(minHandle.value);
+            if (v >= currentZoom.endSec - MIN_SPAN) v = currentZoom.endSec - MIN_SPAN;
+            currentZoom.startSec = v;
+            applyZoomToAllCharts();
+            zoomBars.forEach(syncZoomBar);
+        });
+        maxHandle.addEventListener('input', () => {
+            let v = parseFloat(maxHandle.value);
+            if (v <= currentZoom.startSec + MIN_SPAN) v = currentZoom.startSec + MIN_SPAN;
+            currentZoom.endSec = v;
+            applyZoomToAllCharts();
+            zoomBars.forEach(syncZoomBar);
+        });
+        reset.addEventListener('click', () => {
+            currentZoom.startSec = currentZoom.minSec;
+            currentZoom.endSec   = currentZoom.maxSec;
+            applyZoomToAllCharts();
+            zoomBars.forEach(syncZoomBar);
+        });
+
+        return bar;
+    }
+
+    /** Push current zoom state into one slider's UI elements. */
+    function syncZoomBar(bar) {
+        const m  = currentZoom.minSec;
+        const M  = currentZoom.maxSec;
+        if (M <= m) return;
+        bar._minHandle.min = m;
+        bar._minHandle.max = M;
+        bar._minHandle.value = currentZoom.startSec;
+        bar._maxHandle.min = m;
+        bar._maxHandle.max = M;
+        bar._maxHandle.value = currentZoom.endSec;
+        const span    = M - m;
+        const leftPct  = ((currentZoom.startSec - m) / span) * 100;
+        const rightPct = ((currentZoom.endSec   - m) / span) * 100;
+        bar._fill.style.left  = leftPct + '%';
+        bar._fill.style.width = (rightPct - leftPct) + '%';
+        bar._leftLabel.textContent  = formatTime(currentZoom.startSec);
+        bar._rightLabel.textContent = formatTime(currentZoom.endSec);
+        bar._reset.disabled =
+                currentZoom.startSec === currentZoom.minSec
+             && currentZoom.endSec   === currentZoom.maxSec;
+    }
+
+    /**
+     * Called by every render function after the chart instance has
+     * been created. Routes the chart into the time-axis registry (if
+     * its x-axis is time), applies the current zoom, and ensures a
+     * zoom slider exists in the card body. For non-time charts, any
+     * previously injected slider is removed so the card doesn't
+     * advertise a control that doesn't apply.
+     */
+    function postRenderHook(canvasId, view) {
+        const chart = charts[canvasId];
+        if (!chart) return;
+        const data = view?.aggregation?.data;
+        const isTime = data && data.xAxisLabel === 'time (s)';
+        const card = document.getElementById(canvasId)?.closest('.chart-card');
+        if (!card) return;
+        const existingBar = card.querySelector('.chart-zoom-bar');
+        if (isTime) {
+            timeAxisChartIds.add(canvasId);
+            if (currentZoom.minSec < currentZoom.maxSec) applyZoomToChart(chart);
+            if (!existingBar) {
+                const bar = createZoomBar(canvasId);
+                card.appendChild(bar);
+                zoomBars.set(canvasId, bar);
+                if (currentZoom.minSec < currentZoom.maxSec) syncZoomBar(bar);
+            } else {
+                zoomBars.set(canvasId, existingBar);
+                syncZoomBar(existingBar);
+            }
+        } else {
+            timeAxisChartIds.delete(canvasId);
+            zoomBars.delete(canvasId);
+            if (existingBar) existingBar.remove();
+        }
+    }
+
+    // ---------- Per-card full-screen toggle ----------
+    // Every .chart-card gets a small "expand" button injected into its
+    // top-right corner. Click toggles a card-fullscreen class that
+    // pins the card to the viewport at z-index 100; Esc dismisses.
+    // Only one card can be fullscreen at a time. Chart.js's
+    // ResizeObserver normally picks up the height change, but we
+    // also call chart.resize() on the next frame to defeat any
+    // race where the canvas resizes a fraction late.
+
+    const EXPAND_ICON_SVG = '<svg width="14" height="14" viewBox="0 0 24 24"'
+            + ' fill="none" stroke="currentColor" stroke-width="2"'
+            + ' stroke-linecap="round" stroke-linejoin="round">'
+            + '<path d="M3 9V3h6"/><path d="M21 9V3h-6"/>'
+            + '<path d="M21 15v6h-6"/><path d="M3 15v6h6"/></svg>';
+
+    const COLLAPSE_ICON_SVG = '<svg width="14" height="14" viewBox="0 0 24 24"'
+            + ' fill="none" stroke="currentColor" stroke-width="2"'
+            + ' stroke-linecap="round" stroke-linejoin="round">'
+            + '<path d="M9 3v6H3"/><path d="M15 3v6h6"/>'
+            + '<path d="M15 21v-6h6"/><path d="M9 21v-6H3"/></svg>';
+
+    function setupChartFullscreen() {
+        document.querySelectorAll('.chart-card').forEach(card => {
+            if (card.querySelector('.chart-expand-btn')) return;
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'chart-expand-btn';
+            btn.innerHTML = EXPAND_ICON_SVG;
+            btn.title = 'Toggle full screen (Esc to exit)';
+            btn.setAttribute('aria-label', 'Toggle full screen');
+            btn.addEventListener('click', e => {
+                e.stopPropagation();
+                toggleCardFullscreen(card);
+            });
+            card.appendChild(btn);
+        });
+        document.addEventListener('keydown', e => {
+            if (e.key === 'Escape') exitCardFullscreen();
+        });
+    }
+
+    function toggleCardFullscreen(card) {
+        const wasFullscreen = card.classList.contains('card-fullscreen');
+        // Drop any other fullscreen card first — only one at a time.
+        exitCardFullscreen();
+        if (!wasFullscreen) {
+            card.classList.add('card-fullscreen');
+            document.body.classList.add('chart-fullscreen');
+            const btn = card.querySelector('.chart-expand-btn');
+            if (btn) btn.innerHTML = COLLAPSE_ICON_SVG;
+            resizeChartIn(card);
+        }
+    }
+
+    function exitCardFullscreen() {
+        document.querySelectorAll('.card-fullscreen').forEach(card => {
+            card.classList.remove('card-fullscreen');
+            const btn = card.querySelector('.chart-expand-btn');
+            if (btn) btn.innerHTML = EXPAND_ICON_SVG;
+            resizeChartIn(card);
+        });
+        document.body.classList.remove('chart-fullscreen');
+    }
+
+    function resizeChartIn(card) {
+        const canvas = card.querySelector('canvas');
+        if (!canvas) return;
+        const chart = charts[canvas.id];
+        if (chart) {
+            // Defer so Chart.js sees the new parent dimensions.
+            requestAnimationFrame(() => chart.resize());
+        }
+    }
+
     /** Reveal Summary, Analytics and Charts after a successful analyze. */
     function revealResultSections() {
         document.querySelectorAll('.page-section').forEach(s => s.classList.remove('hidden'));
@@ -770,7 +1221,7 @@
             if (tri.contains(e.target)) {
                 elem.classList.toggle('collapsed');
             } else if (target) {
-                target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                navigateToSidebarTarget(target);
             }
         });
         const body = document.createElement('div');
@@ -811,6 +1262,41 @@
         return { elem, body };
     }
 
+    /**
+     * Sidebar click navigation. In normal scroll mode, smooth-scroll
+     * to the target. In expanded mode, swap the fullscreen card to
+     * the target's containing chart-card so the user can step through
+     * charts one at a time without leaving the focused view. If the
+     * target is something inside the card (e.g. an analytics finding
+     * row), scroll to it after the swap.
+     */
+    function navigateToSidebarTarget(target) {
+        const card = target.classList.contains('chart-card')
+                ? target
+                : target.closest('.chart-card');
+        const inFullscreen = document.body.classList.contains('chart-fullscreen');
+        if (inFullscreen && card) {
+            const current = document.querySelector('.card-fullscreen');
+            if (current && current !== card) {
+                current.classList.remove('card-fullscreen');
+                const oldBtn = current.querySelector('.chart-expand-btn');
+                if (oldBtn) oldBtn.innerHTML = EXPAND_ICON_SVG;
+                resizeChartIn(current);
+            }
+            if (!card.classList.contains('card-fullscreen')) {
+                card.classList.add('card-fullscreen');
+                const newBtn = card.querySelector('.chart-expand-btn');
+                if (newBtn) newBtn.innerHTML = COLLAPSE_ICON_SVG;
+                resizeChartIn(card);
+            }
+            if (target !== card) {
+                target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            }
+        } else {
+            target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+    }
+
     function makeItem({ number, label, target, disabled, severity }) {
         const elem = document.createElement('div');
         elem.className = 'sidebar-item';
@@ -835,9 +1321,7 @@
         // can map intersecting elements back to their nav items.
         elem._target = target;
         if (!disabled && target) {
-            elem.addEventListener('click', () => {
-                target.scrollIntoView({ behavior: 'smooth', block: 'start' });
-            });
+            elem.addEventListener('click', () => navigateToSidebarTarget(target));
         }
         return elem;
     }
@@ -939,6 +1423,7 @@
                 }
             }
         });
+        postRenderHook(canvasId, view);
     }
 
     // ---------- Stacked-area rendering (G1 phase time-series) ----------
@@ -1004,6 +1489,7 @@
                 }
             }
         });
+        postRenderHook(canvasId, view);
     }
 
     // ---------- Stacked-scatter-with-shading rendering (G1 region counts) ----------
@@ -1081,6 +1567,7 @@
                 }
             }
         });
+        postRenderHook(canvasId, view);
     }
 
     // ---------- Multi-series scatter rendering (XYSeriesData) ----------
@@ -1149,6 +1636,7 @@
                 }
             }
         });
+        postRenderHook(canvasId, view);
     }
 
     // ---------- Categorical stacked-bar rendering (GC cause histogram) ----------
@@ -1205,6 +1693,7 @@
                 }
             }
         });
+        postRenderHook(canvasId, view);
     }
 
     // ---------- Analytics rendering ----------
@@ -1409,6 +1898,10 @@
 
         goBtn.disabled = true;
         setStatus(`Uploading ${file.name} (${Math.round(file.size / 1024)} KB)…`);
+        // New analyze == fresh state: drop any zoom that was set on
+        // the previous log so this one starts un-zoomed.
+        resetZoomState();
+        exitCardFullscreen();
         try {
             const { id } = await upload(file);
             setStatus(`Parsed. Session ${id}. Loading views…`);
@@ -1506,6 +1999,11 @@
             // After every chart renderer has set its card visibility,
             // hide subsections whose cards are all empty.
             hideEmptySubsections();
+            // Derive zoom bounds from the union of x ranges across the
+            // time-axis charts and seed the sliders. Must run before
+            // buildSidebar so the rail's active-highlight observer
+            // sees the final card layout.
+            computeAndApplyInitialBounds();
             // Now that hidden state is settled, build the sidebar from
             // current DOM + analytics data. Hidden cards / subsections
             // become greyed-out non-interactive entries.
@@ -1523,6 +2021,11 @@
     fileInput.addEventListener('change', () => {
         if (fileInput.files[0]) setStatus(`Selected ${fileInput.files[0].name}. Hit Analyze.`);
     });
+
+    // Inject the per-card expand buttons once at script load. The
+    // chart-cards exist in static markup so they're already in the DOM
+    // by the time this runs (script tag is at the end of <body>).
+    setupChartFullscreen();
 })();
 </script>
 </body>

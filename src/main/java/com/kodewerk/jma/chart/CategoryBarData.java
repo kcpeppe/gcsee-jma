@@ -1,5 +1,7 @@
 package com.kodewerk.jma.chart;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
+
 import java.util.ArrayList;
 import java.util.List;
 
@@ -50,9 +52,10 @@ public final class CategoryBarData {
         bars.add(new Bar(category, values.clone()));
     }
 
-    public String getXAxisLabel() { return xAxisLabel; }
-    public String getYAxisLabel() { return yAxisLabel; }
-    public String getYUnit()      { return yUnit; }
+    // See note in ScatterData on the Jackson naming pin.
+    @JsonProperty("xAxisLabel") public String getXAxisLabel() { return xAxisLabel; }
+    @JsonProperty("yAxisLabel") public String getYAxisLabel() { return yAxisLabel; }
+    @JsonProperty("yUnit")      public String getYUnit()      { return yUnit; }
     public List<Series> getSeries() { return series; }
     public List<Bar> getBars()      { return bars; }
 

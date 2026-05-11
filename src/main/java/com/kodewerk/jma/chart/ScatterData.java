@@ -1,5 +1,7 @@
 package com.kodewerk.jma.chart;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
+
 import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.List;
@@ -41,9 +43,12 @@ public final class ScatterData {
         byCategory.computeIfAbsent(category, k -> new ArrayList<>()).add(new Point(t, y));
     }
 
-    public String getXAxisLabel() { return xAxisLabel; }
-    public String getYAxisLabel() { return yAxisLabel; }
-    public String getYUnit()      { return yUnit; }
+    // Jackson 2.21 lowercases consecutive uppercase letters at the start
+    // of a property name (getXAxisLabel → xaxisLabel), which doesn't
+    // match what the frontend expects. Pin the JSON keys explicitly.
+    @JsonProperty("xAxisLabel") public String getXAxisLabel() { return xAxisLabel; }
+    @JsonProperty("yAxisLabel") public String getYAxisLabel() { return yAxisLabel; }
+    @JsonProperty("yUnit")      public String getYUnit()      { return yUnit; }
 
     public int getPointCount() {
         int n = 0;
