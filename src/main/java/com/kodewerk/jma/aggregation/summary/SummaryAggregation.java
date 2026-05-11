@@ -11,8 +11,8 @@ import java.util.Map;
 
 /**
  * Log-summary view: a single tabular rollup per GC log, covering every
- * non-ZGC collector family (Serial, Parallel, ParNew+CMS, G1) back to
- * JDK 1.4.2. Produces one {@link SummaryData} with a headline scalar
+ * collector family from Serial back in JDK 1.4.2 through generational
+ * ZGC. Produces one {@link SummaryData} with a headline scalar
  * block, one or more tables (always a stop-the-world pauses table,
  * optionally a concurrent-phases table when concurrent events were
  * seen), and a list of notes for rare-event counters (heap resizes,
@@ -28,9 +28,15 @@ import java.util.Map;
  * to make it a column was always sparse and didn't carry useful
  * per-row information.
  * <p>
- * ZGC is deliberately not part of this view yet — see Kirk's note that
- * GCSee's ZGC model needs updating (young/old collection embedding)
- * before a meaningful summary can be produced.
+ * On ZGC logs the headline drops Full-GC and concurrent-time scalars
+ * (generational ZGC has no Full GC in steady state and its concurrent
+ * work doesn't contribute to the application-throughput formula) and
+ * adds an allocation-stall counter — the ZGC-specific "heap too small"
+ * signal. Each ZGCCollection folds into one row keyed by its event
+ * simple name (ZGCYoungCollection / ZGCOldCollection / ZGCFullCollection)
+ * with the three sub-pauses (mark-start, mark-end, relocate-start)
+ * rolled together into the row's totals; see
+ * {@link SummaryAggregator#onZgcCycle}.
  */
 @Collates(SummaryAggregator.class)
 public final class SummaryAggregation extends JmaAggregation {
@@ -76,11 +82,19 @@ public final class SummaryAggregation extends JmaAggregation {
     private long g1InitialMarkCount   = 0;
     private long concurrentAborted    = 0;
     private long toSpaceExhaustedCount = 0;
+    /** ZGC: collections triggered by an allocation stall (GCCause.ALLOC_STALL). */
+    private long zgcAllocationStallCount = 0;
 
-    // Collector-family flags — used at emit time to decide which tables
-    // and columns to include.
-    private boolean anyG1Seen  = false;
-    private boolean anyCmsSeen = false;
+    // Collector-family flags — used at emit time to decide which
+    // headlines, tables, and columns to include. Flags are set by the
+    // matching aggregator as soon as it identifies a representative
+    // event from each family; {@link #detectCollector()} resolves
+    // them into the canonical short name the frontend filters on.
+    private boolean anyG1Seen       = false;
+    private boolean anyCmsSeen      = false;
+    private boolean anyParallelSeen = false;
+    private boolean anySerialSeen   = false;
+    private boolean anyZgcSeen      = false;
 
     /** Required by the GCSee module SPI. */
     public SummaryAggregation() {}
@@ -95,19 +109,54 @@ public final class SummaryAggregation extends JmaAggregation {
         return concurrentRows.computeIfAbsent(key, k -> new ConcurrentRow(label));
     }
 
-    void noteHeapResize()       { heapResizeCount++; }
-    void noteBackToBack()       { backToBackCount++; }
-    void noteG1InitialMark()    { g1InitialMarkCount++; }
-    void noteConcurrentAbort()  { concurrentAborted++; }
-    void noteToSpaceExhausted() { toSpaceExhaustedCount++; }
-    void markG1Seen()           { anyG1Seen = true; }
-    void markCmsSeen()          { anyCmsSeen = true; }
+    void noteHeapResize()        { heapResizeCount++; }
+    void noteBackToBack()        { backToBackCount++; }
+    void noteG1InitialMark()     { g1InitialMarkCount++; }
+    void noteConcurrentAbort()   { concurrentAborted++; }
+    void noteToSpaceExhausted()  { toSpaceExhaustedCount++; }
+    void noteAllocationStall()   { zgcAllocationStallCount++; }
+    void markG1Seen()            { anyG1Seen = true; }
+    void markCmsSeen()           { anyCmsSeen = true; }
+    void markParallelSeen()      { anyParallelSeen = true; }
+    void markSerialSeen()        { anySerialSeen = true; }
+    void markZgcSeen()           { anyZgcSeen = true; }
+
+    /**
+     * Resolve the observed-event flags into a single collector-family
+     * tag the frontend filters on. Priority order reflects specificity:
+     * ZGC and G1 events are unique to their collectors, CMS detection
+     * requires a CMS-only marker (so it overrides "Parallel" if both
+     * somehow appear), Parallel/Serial fall out from PS-prefixed and
+     * DefNew events respectively.
+     */
+    String detectCollector() {
+        if (anyZgcSeen)      return "zgc";
+        if (anyG1Seen)       return "g1";
+        if (anyCmsSeen)      return "cms";
+        if (anyParallelSeen) return "parallel";
+        if (anySerialSeen)   return "serial";
+        return "unknown";
+    }
 
     // ----- View-side read API -----
 
     public SummaryData getData() {
         SummaryData out = new SummaryData("Log summary");
-        populateHeadline(out);
+        String collector = detectCollector();
+        out.setCollector(collector);
+        // Headline scalars vary by collector family. Parallel and Serial
+        // share a tighter set tailored to their stop-the-world-only
+        // behaviour; G1, CMS, ZGC, and the unknown-fallback case use
+        // the original headline layout that includes concurrent-time
+        // and MMU columns. The Collection Type Breakdown (the STW
+        // table) is reused as-is across collectors.
+        if ("parallel".equals(collector) || "serial".equals(collector)) {
+            populateParallelSerialHeadline(out);
+        } else if ("zgc".equals(collector)) {
+            populateZgcHeadline(out);
+        } else {
+            populateHeadline(out);
+        }
         out.addTable(buildStwTable());
         if (!concurrentRows.isEmpty()) {
             out.addTable(buildConcurrentTable());
@@ -203,6 +252,98 @@ public final class SummaryAggregation extends JmaAggregation {
         out.addHeadline("Avg recovery rate",       avgRecovRate,   "MB/s", "decimal1");
     }
 
+    /**
+     * Headline scalars for the Parallel and Serial collectors. Neither
+     * runs concurrent-phase work, so the headline drops the
+     * concurrent / MMU readouts the generic version carries and
+     * adds the Full-GC-to-total-pause ratio (a quick "how much of
+     * your pause budget did the worst events eat?" gauge).
+     * <p>
+     * {@code SystemGC} pauses are counted into the total / full-GC
+     * pause time per the project convention — a {@code System.gc()}
+     * call lands in the STW pauses table as its own row, but its
+     * pause time still contributes to the aggregate ratio.
+     */
+    private void populateParallelSerialHeadline(SummaryData out) {
+        double logDur       = logDurationSec();
+        double totalPause   = totalPauseSec();
+        double allocatedMb  = totalAllocatedMb();
+        double recoveredMb  = totalRecoveredMb();
+        double fullGcPause  = fullGcPauseSec();
+
+        double appTime      = Math.max(0.0, logDur - totalPause);
+        double avgAllocRate = appTime > 0.0 ? allocatedMb / appTime : 0.0;
+        double avgRecovRate = logDur > 0.0 ? recoveredMb / logDur : 0.0;
+        double appThroughput = logDur > 0.0
+                ? 100.0 * (1.0 - totalPause / logDur)
+                : 100.0;
+        double fullToTotalRatio = totalPause > 0.0
+                ? 100.0 * fullGcPause / totalPause
+                : 0.0;
+
+        out.addHeadline("Total allocated",             allocatedMb,    "MB",   "int");
+        out.addHeadline("Total recovered",             recoveredMb,    "MB",   "int");
+        out.addHeadline("Avg allocation rate",         avgAllocRate,   "MB/s", "decimal1");
+        out.addHeadline("Avg recovery rate",           avgRecovRate,   "MB/s", "decimal1");
+        out.addHeadline("Back-to-back collections",    backToBackCount, "",    "int");
+        out.addHeadline("Total pause time",            totalPause,     "s",    "decimal2");
+        out.addHeadline("Full-GC pause time",          fullGcPause,    "s",    "decimal2");
+        out.addHeadline("Full-GC / total pause",       fullToTotalRatio, "%",  "decimal2");
+        out.addHeadline("Application throughput",      appThroughput,  "%",    "decimal2");
+    }
+
+    /**
+     * Headline scalars for generational ZGC. ZGC has no Full GC in
+     * normal operation (Full collections are an emergency fallback —
+     * surfaced as a note if the row exists rather than as a headline),
+     * its STW work is partitioned across three sub-pauses per cycle so
+     * the row-level "Max" already shows worst-case pause magnitude, and
+     * the dominant operational concern is sustained allocation pressure
+     * rather than full-heap reclamation. The headline therefore focuses
+     * on cycle volume by type, application throughput (target 99.9%),
+     * and the allocation-stall counter — the ZGC-specific "heap too
+     * small" signal.
+     */
+    private void populateZgcHeadline(SummaryData out) {
+        double logDur     = logDurationSec();
+        double totalPause = totalPauseSec();
+        double appThroughput = logDur > 0.0
+                ? 100.0 * (1.0 - totalPause / logDur)
+                : 100.0;
+        double avgCycleSec = 0.0;
+        long cycleCount = 0;
+        for (StwRow r : stwRows.values()) cycleCount += r.invocations;
+        if (cycleCount > 0) avgCycleSec = totalPause / cycleCount;
+
+        long youngCycles = 0;
+        long oldCycles   = 0;
+        long fullCycles  = 0;
+        for (Map.Entry<String, StwRow> e : stwRows.entrySet()) {
+            String key = e.getKey();
+            long invocations = e.getValue().invocations;
+            switch (key) {
+                case "ZGCYoungCollection": youngCycles += invocations; break;
+                case "ZGCOldCollection":   oldCycles   += invocations; break;
+                case "ZGCFullCollection":  fullCycles  += invocations; break;
+                default: /* defensive — should not happen for ZGC logs */ break;
+            }
+        }
+
+        out.addHeadline("Log duration",             logDur,                "s",  "decimal2");
+        out.addHeadline("Young cycles",             (double) youngCycles,  "",   "int");
+        out.addHeadline("Old cycles",               (double) oldCycles,    "",   "int");
+        if (fullCycles > 0) {
+            // Show only when present; generational ZGC should not run Full
+            // collections in steady state, so a non-zero is a signal worth
+            // putting on the headline rather than burying in a note.
+            out.addHeadline("Full cycles",          (double) fullCycles,   "",   "int");
+        }
+        out.addHeadline("Total pause time",         totalPause,            "s",  "decimal2");
+        out.addHeadline("Avg pause / cycle",        avgCycleSec * 1000.0,  "ms", "decimal2");
+        out.addHeadline("Application throughput",   appThroughput,         "%",  "decimal3");
+        out.addHeadline("Allocation stalls",        (double) zgcAllocationStallCount, "", "int");
+    }
+
     private SummaryData.Table buildStwTable() {
         List<SummaryData.Column> columns = new ArrayList<>();
         columns.add(new SummaryData.Column("count",      "Count",      "",     "int",      "right"));
@@ -285,6 +426,20 @@ public final class SummaryAggregation extends JmaAggregation {
         if (anyCmsSeen) {
             out.addNote("CMS concurrent aborts",  concurrentAborted);
         }
+        if (anyZgcSeen) {
+            out.addNote("Allocation stalls",      zgcAllocationStallCount);
+        }
+    }
+
+    /**
+     * Public counter used by the ZGC analytics group. Lives here rather
+     * than in {@link com.kodewerk.jma.analytics.AnalyticsAggregation}
+     * because the summary aggregator is the one already pattern-matching
+     * on {@code GCCause.ALLOC_STALL}; duplicating the detection in two
+     * places would invite drift.
+     */
+    public long getZgcAllocationStallCount() {
+        return zgcAllocationStallCount;
     }
 
     @Override

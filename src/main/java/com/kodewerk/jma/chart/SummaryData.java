@@ -63,9 +63,24 @@ public final class SummaryData {
     private final List<Table>  tables   = new ArrayList<>();
     private final List<Note>   notes    = new ArrayList<>();
 
+    /**
+     * Detected collector family for the log this summary describes —
+     * one of {@code "g1"}, {@code "cms"}, {@code "parallel"},
+     * {@code "serial"}, {@code "zgc"}, or {@code "unknown"}. Drives
+     * collector-specific filtering on the frontend (nav rail
+     * entries, hidden charts, etc.). Defaults to {@code "unknown"}
+     * until the aggregation sets it.
+     */
+    private String collector = "unknown";
+
     public SummaryData(String title) {
         this.title = title;
     }
+
+    public void setCollector(String collector) {
+        if (collector != null) this.collector = collector;
+    }
+    public String getCollector() { return collector; }
 
     public void addHeadline(String label, double value, String unit, String format) {
         headline.add(new Scalar(label, value, unit, format));

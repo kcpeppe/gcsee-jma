@@ -30,14 +30,82 @@ public final class PauseAnalytics {
 
     private static final String GROUP = "Pause times";
 
-    /** Warning threshold for max pause (ms). */
-    public static final double HIGH_PAUSE_WARN_MS        = 200.0;
+    /**
+     * Warning threshold for max pause on G1 (and any other low-pause
+     * collector). G1 targets ~200 ms by default
+     * ({@code -XX:MaxGCPauseMillis=200}), so anything above that is
+     * worth flagging.
+     */
+    public static final double HIGH_PAUSE_WARN_MS = 200.0;
 
-    /** Significant threshold for max pause (ms). */
+    /**
+     * Warning threshold for max pause on Parallel / Serial collectors.
+     * Higher than G1's because those collectors do full-heap STW work
+     * on every old-gen reclamation — pauses below ~500 ms aren't
+     * meaningful signals on workloads where full GCs are part of
+     * normal operation. Above 500 ms is still worth a look.
+     */
+    public static final double HIGH_PAUSE_WARN_MS_PARALLEL_SERIAL = 500.0;
+
+    /**
+     * Warning threshold for max pause on ZGC. ZGC is designed to keep
+     * STW work in the single-digit-millisecond range; any pause above
+     * 10 ms is unusual and worth flagging.
+     */
+    public static final double HIGH_PAUSE_WARN_MS_ZGC = 10.0;
+
+    /** Significant threshold for max pause (ms) on most collectors. */
     public static final double HIGH_PAUSE_SIGNIFICANT_MS = 1000.0;
 
-    /** Throughput target (percentage). */
+    /**
+     * Significant threshold for max pause on ZGC. Far tighter than the
+     * general 1 s line because ZGC's STW work should never approach
+     * that magnitude — 50 ms is already a regression of an order of
+     * magnitude over the collector's design target.
+     */
+    public static final double HIGH_PAUSE_SIGNIFICANT_MS_ZGC = 50.0;
+
+    /**
+     * Resolve the per-collector warning threshold. Parallel and Serial
+     * use the looser 500 ms line; ZGC uses 10 ms; everything else uses
+     * the 200 ms one.
+     */
+    private static double warnThresholdMs(String collector) {
+        if ("zgc".equals(collector)) return HIGH_PAUSE_WARN_MS_ZGC;
+        if ("parallel".equals(collector) || "serial".equals(collector)) {
+            return HIGH_PAUSE_WARN_MS_PARALLEL_SERIAL;
+        }
+        return HIGH_PAUSE_WARN_MS;
+    }
+
+    /**
+     * Resolve the per-collector "significant" threshold. ZGC's design
+     * promises near-zero STW so anything past 50 ms is significant;
+     * the other families use the conventional 1 s line.
+     */
+    private static double significantThresholdMs(String collector) {
+        return "zgc".equals(collector)
+                ? HIGH_PAUSE_SIGNIFICANT_MS_ZGC
+                : HIGH_PAUSE_SIGNIFICANT_MS;
+    }
+
+    /** Throughput target (percentage) for most collectors. */
     public static final double THROUGHPUT_TARGET_PCT = 95.0;
+
+    /**
+     * Throughput target for ZGC. ZGC is designed to keep mutators
+     * running concurrently with the collector — only the three short
+     * STW sub-pauses per cycle interrupt the application — so the
+     * conventional 95 % target is far too forgiving. 99.9 % is the
+     * design intent and the rule-of-thumb operational target.
+     */
+    public static final double THROUGHPUT_TARGET_PCT_ZGC = 99.9;
+
+    private static double throughputTargetPct(String collector) {
+        return "zgc".equals(collector)
+                ? THROUGHPUT_TARGET_PCT_ZGC
+                : THROUGHPUT_TARGET_PCT;
+    }
 
     /** Sliding-window length (seconds) for the windowed-throughput check. */
     public static final double THROUGHPUT_WINDOW_SEC = 30.0 * 60.0;
@@ -93,35 +161,40 @@ public final class PauseAnalytics {
             return new AnalyticsFinding(GROUP, "High pause time", Impact.OK,
                     "No stop-the-world pause events recorded.", "");
         }
+        String collector = agg.detectCollector();
+        double warnMs = warnThresholdMs(collector);
+        double sigMs  = significantThresholdMs(collector);
+
         double maxSec = 0.0;
-        long over200 = 0;
-        long over1000 = 0;
+        long overWarn = 0;
+        long overSig  = 0;
         for (double[] e : events) {
             double s = e[1];
             if (s > maxSec) maxSec = s;
-            if (s * 1000.0 > HIGH_PAUSE_WARN_MS)        over200++;
-            if (s * 1000.0 > HIGH_PAUSE_SIGNIFICANT_MS) over1000++;
+            if (s * 1000.0 > warnMs) overWarn++;
+            if (s * 1000.0 > sigMs)  overSig++;
         }
         double maxMs = maxSec * 1000.0;
 
         Impact impact;
-        if (maxMs > HIGH_PAUSE_SIGNIFICANT_MS)      impact = Impact.SIGNIFICANT;
-        else if (maxMs > HIGH_PAUSE_WARN_MS)        impact = Impact.CONCERNING;
-        else                                        impact = Impact.OK;
+        if (maxMs > sigMs)       impact = Impact.SIGNIFICANT;
+        else if (maxMs > warnMs) impact = Impact.CONCERNING;
+        else                     impact = Impact.OK;
 
         String message = String.format(Locale.ROOT,
                 "Max pause %s ms. %d pause(s) exceeded %.0f ms, %d pause(s) "
                 + "exceeded %.0f ms (out of %d total).",
                 formatMs(maxMs),
-                over200, HIGH_PAUSE_WARN_MS,
-                over1000, HIGH_PAUSE_SIGNIFICANT_MS,
+                overWarn, warnMs,
+                overSig, sigMs,
                 events.size());
 
         if (impact == Impact.OK) {
             return new AnalyticsFinding(GROUP, "High pause time", impact, message, "");
         }
-        String details = """
-                Pauses above 200 ms are user-noticeable in latency-sensitive \
+        boolean isParallelOrSerial = "parallel".equals(collector) || "serial".equals(collector);
+        String detailsBase = String.format(Locale.ROOT, """
+                Pauses above %.0f ms are user-noticeable in latency-sensitive \
                 services; pauses above one second are disruptive on almost \
                 any workload.
 
@@ -142,7 +215,19 @@ public final class PauseAnalytics {
                 consider raising -Xmx if mixed cycles are dragging the \
                 tail. For ZGC / Shenandoah, the worst pauses are usually \
                 reference processing or root scanning — capture a JFR \
-                recording during a bad pause to find the dominant phase.""";
+                recording during a bad pause to find the dominant phase.""",
+                warnMs);
+        String details = isParallelOrSerial
+                ? detailsBase + "\n\n"
+                  + "On Parallel and Serial, the longest pauses are almost "
+                  + "always full GCs — those collectors reclaim the old "
+                  + "generation by stopping the world and tracing the whole "
+                  + "heap. Long pauses are expected periodic events, not "
+                  + "necessarily a failure mode; cross-reference with the "
+                  + "Full-GC pause / total pause ratio in the Summary to "
+                  + "decide whether full GCs are claiming an outsized share "
+                  + "of your pause budget."
+                : detailsBase;
         return new AnalyticsFinding(GROUP, "High pause time", impact, message, details);
     }
 
@@ -159,6 +244,9 @@ public final class PauseAnalytics {
         for (double[] e : events) totalPause += e[1];
         double overallPct = (1.0 - totalPause / duration) * 100.0;
 
+        String collector = agg.detectCollector();
+        double targetPct = throughputTargetPct(collector);
+
         // Worst sliding-window throughput. Only meaningful if the log is
         // long enough to host a full window — otherwise we report the
         // overall figure and skip the windowed check.
@@ -173,10 +261,10 @@ public final class PauseAnalytics {
 
         Impact impact;
         String verdict;
-        if (overallPct < THROUGHPUT_TARGET_PCT) {
+        if (overallPct < targetPct) {
             impact  = Impact.SIGNIFICANT;
             verdict = "Below target overall";
-        } else if (worstWindowPct != null && worstWindowPct < THROUGHPUT_TARGET_PCT) {
+        } else if (worstWindowPct != null && worstWindowPct < targetPct) {
             impact  = Impact.CONCERNING;
             verdict = "Below target in at least one 30-minute window";
         } else {
@@ -186,10 +274,10 @@ public final class PauseAnalytics {
 
         StringBuilder msg = new StringBuilder();
         msg.append(verdict).append(". Overall throughput ");
-        msg.append(String.format(Locale.ROOT, "%.2f%%", overallPct));
+        msg.append(String.format(Locale.ROOT, "%.3f%%", overallPct));
         msg.append(String.format(Locale.ROOT,
-                " (target %.0f%%); total STW %.2fs over %.1fs of runtime",
-                THROUGHPUT_TARGET_PCT, totalPause, duration));
+                " (target %.1f%%); total STW %.2fs over %.1fs of runtime",
+                targetPct, totalPause, duration));
         if (worstWindowPct != null) {
             msg.append(String.format(Locale.ROOT,
                     "; worst 30-minute window %.2f%% starting at t=%.1fs",
@@ -392,10 +480,15 @@ public final class PauseAnalytics {
         // Descriptive view — severity mirrors the high-pause-time finding's
         // headline (no sense badging the same problem twice). p99 is the
         // best single number to grade on because it's stable to outliers.
+        // The warn threshold is collector-aware (looser on Parallel /
+        // Serial where full GCs are routine).
+        String collector = agg.detectCollector();
+        double warnMs = warnThresholdMs(collector);
+        double sigMs  = significantThresholdMs(collector);
         Impact impact;
-        if (p99 > HIGH_PAUSE_SIGNIFICANT_MS)      impact = Impact.SIGNIFICANT;
-        else if (p99 > HIGH_PAUSE_WARN_MS)        impact = Impact.CONCERNING;
-        else                                      impact = Impact.OK;
+        if (p99 > sigMs)        impact = Impact.SIGNIFICANT;
+        else if (p99 > warnMs)  impact = Impact.CONCERNING;
+        else                    impact = Impact.OK;
 
         String message = String.format(Locale.ROOT,
                 "p10=%s ms, p50=%s ms, p90=%s ms, p99=%s ms, max=%s ms (n=%d).",

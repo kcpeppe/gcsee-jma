@@ -31,9 +31,19 @@ import com.kodewerk.jma.aggregation.heap.HeapOccupancyAfterPercentAggregation;
 import com.kodewerk.jma.aggregation.heap.HeapOccupancyAggregation;
 import com.kodewerk.jma.aggregation.heap.HeapOccupancyBeforeAggregation;
 import com.kodewerk.jma.aggregation.heap.HeapOccupancyBeforePercentAggregation;
+import com.kodewerk.jma.aggregation.heap.TenuredOccupancyAggregation;
+import com.kodewerk.jma.aggregation.heap.TenuredOccupancyBeforeAggregation;
 import com.kodewerk.jma.aggregation.metaspace.MetaspaceOccupancyAggregation;
 import com.kodewerk.jma.aggregation.pause.PauseTimeAggregation;
 import com.kodewerk.jma.aggregation.summary.SummaryAggregation;
+import com.kodewerk.jma.aggregation.zgc.ZgcConcurrentPhaseDurationsAggregation;
+import com.kodewerk.jma.aggregation.zgc.ZgcCycleDurationsAggregation;
+import com.kodewerk.jma.aggregation.zgc.ZgcCycleDurationsAndIntervalsAggregation;
+import com.kodewerk.jma.aggregation.zgc.ZgcCycleTimePercentAggregation;
+import com.kodewerk.jma.aggregation.zgc.ZgcLiveAtRelocateEndAggregation;
+import com.kodewerk.jma.aggregation.zgc.ZgcLiveAtRelocateStartAggregation;
+import com.kodewerk.jma.aggregation.zgc.ZgcPauseTimeAggregation;
+import com.kodewerk.jma.aggregation.zgc.ZgcSystemLoadAggregation;
 import com.kodewerk.jma.analytics.AnalyticsAggregation;
 import com.kodewerk.jma.aggregation.tenuring.TenuringByAgeAggregation;
 import com.kodewerk.jma.aggregation.tenuring.TenuringSummaryAggregation;
@@ -175,6 +185,22 @@ public class SessionsResource {
         return viewFor(id, HeapOccupancyAfterPercentAggregation.class,
                        "heap-occupancy-after-percent",
                        "% heap occupancy after collection");
+    }
+
+    @GET
+    @Path("{id}/views/tenured-occupancy")
+    public Response tenuredOccupancy(@PathParam("id") String id) {
+        return viewFor(id, TenuredOccupancyAggregation.class,
+                       "tenured-occupancy",
+                       "Tenured size and occupancy after collection");
+    }
+
+    @GET
+    @Path("{id}/views/tenured-occupancy-before")
+    public Response tenuredOccupancyBefore(@PathParam("id") String id) {
+        return viewFor(id, TenuredOccupancyBeforeAggregation.class,
+                       "tenured-occupancy-before",
+                       "Tenured size and occupancy before collection");
     }
 
     @GET
@@ -425,6 +451,72 @@ public class SessionsResource {
     public Response analytics(@PathParam("id") String id) {
         return viewFor(id, AnalyticsAggregation.class,
                        "analytics", "Analytics");
+    }
+
+    // ---- ZGC (generational) views ------------------------------------------
+
+    @GET
+    @Path("{id}/views/zgc-live-at-relocate-start")
+    public Response zgcLiveAtRelocateStart(@PathParam("id") String id) {
+        return viewFor(id, ZgcLiveAtRelocateStartAggregation.class,
+                       "zgc-live-at-relocate-start",
+                       "Live at relocate start");
+    }
+
+    @GET
+    @Path("{id}/views/zgc-live-at-relocate-end")
+    public Response zgcLiveAtRelocateEnd(@PathParam("id") String id) {
+        return viewFor(id, ZgcLiveAtRelocateEndAggregation.class,
+                       "zgc-live-at-relocate-end",
+                       "Live at relocate end");
+    }
+
+    @GET
+    @Path("{id}/views/zgc-concurrent-phase-durations")
+    public Response zgcConcurrentPhaseDurations(@PathParam("id") String id) {
+        return viewFor(id, ZgcConcurrentPhaseDurationsAggregation.class,
+                       "zgc-concurrent-phase-durations",
+                       "ZGC concurrent phase durations");
+    }
+
+    @GET
+    @Path("{id}/views/zgc-cycle-durations")
+    public Response zgcCycleDurations(@PathParam("id") String id) {
+        return viewFor(id, ZgcCycleDurationsAggregation.class,
+                       "zgc-cycle-durations",
+                       "ZGC cycle durations");
+    }
+
+    @GET
+    @Path("{id}/views/zgc-cycle-time-percent")
+    public Response zgcCycleTimePercent(@PathParam("id") String id) {
+        return viewFor(id, ZgcCycleTimePercentAggregation.class,
+                       "zgc-cycle-time-percent",
+                       "% of cycle time per concurrent phase");
+    }
+
+    @GET
+    @Path("{id}/views/zgc-pause-time")
+    public Response zgcPauseTime(@PathParam("id") String id) {
+        return viewFor(id, ZgcPauseTimeAggregation.class,
+                       "zgc-pause-time",
+                       "ZGC pause time (sub-pauses)");
+    }
+
+    @GET
+    @Path("{id}/views/zgc-cycle-durations-and-intervals")
+    public Response zgcCycleDurationsAndIntervals(@PathParam("id") String id) {
+        return viewFor(id, ZgcCycleDurationsAndIntervalsAggregation.class,
+                       "zgc-cycle-durations-and-intervals",
+                       "ZGC cycle durations and intervals");
+    }
+
+    @GET
+    @Path("{id}/views/zgc-system-load")
+    public Response zgcSystemLoad(@PathParam("id") String id) {
+        return viewFor(id, ZgcSystemLoadAggregation.class,
+                       "zgc-system-load",
+                       "System load (1m / 5m / 15m)");
     }
 
     private <A extends JmaAggregation> Response viewFor(String sessionId,

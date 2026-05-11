@@ -36,9 +36,19 @@ import com.kodewerk.jma.aggregation.heap.HeapOccupancyAfterPercentAggregation;
 import com.kodewerk.jma.aggregation.heap.HeapOccupancyAggregation;
 import com.kodewerk.jma.aggregation.heap.HeapOccupancyBeforeAggregation;
 import com.kodewerk.jma.aggregation.heap.HeapOccupancyBeforePercentAggregation;
+import com.kodewerk.jma.aggregation.heap.TenuredOccupancyAggregation;
+import com.kodewerk.jma.aggregation.heap.TenuredOccupancyBeforeAggregation;
 import com.kodewerk.jma.aggregation.metaspace.MetaspaceOccupancyAggregation;
 import com.kodewerk.jma.aggregation.pause.PauseTimeAggregation;
 import com.kodewerk.jma.aggregation.summary.SummaryAggregation;
+import com.kodewerk.jma.aggregation.zgc.ZgcConcurrentPhaseDurationsAggregation;
+import com.kodewerk.jma.aggregation.zgc.ZgcCycleDurationsAggregation;
+import com.kodewerk.jma.aggregation.zgc.ZgcCycleDurationsAndIntervalsAggregation;
+import com.kodewerk.jma.aggregation.zgc.ZgcCycleTimePercentAggregation;
+import com.kodewerk.jma.aggregation.zgc.ZgcLiveAtRelocateEndAggregation;
+import com.kodewerk.jma.aggregation.zgc.ZgcLiveAtRelocateStartAggregation;
+import com.kodewerk.jma.aggregation.zgc.ZgcPauseTimeAggregation;
+import com.kodewerk.jma.aggregation.zgc.ZgcSystemLoadAggregation;
 import com.kodewerk.jma.analytics.AnalyticsAggregation;
 import com.kodewerk.jma.aggregation.tenuring.TenuringByAgeAggregation;
 import com.kodewerk.jma.aggregation.tenuring.TenuringSummaryAggregation;
@@ -180,6 +190,8 @@ public class SessionService {
                 new HeapOccupancyBeforeAggregation(),
                 new HeapOccupancyBeforePercentAggregation(),
                 new HeapOccupancyAfterPercentAggregation(),
+                new TenuredOccupancyAggregation(),
+                new TenuredOccupancyBeforeAggregation(),
                 new MetaspaceOccupancyAggregation(),
                 new PauseTimeAggregation(),
                 new PercentTimeInGcAggregation(),
@@ -213,6 +225,14 @@ public class SessionService {
                 new ReferenceTimeAggregation(),
                 new SafepointDurationAggregation(),
                 new SafepointCauseAggregation(),
+                new ZgcLiveAtRelocateStartAggregation(),
+                new ZgcLiveAtRelocateEndAggregation(),
+                new ZgcConcurrentPhaseDurationsAggregation(),
+                new ZgcCycleDurationsAggregation(),
+                new ZgcCycleTimePercentAggregation(),
+                new ZgcPauseTimeAggregation(),
+                new ZgcCycleDurationsAndIntervalsAggregation(),
+                new ZgcSystemLoadAggregation(),
                 new AnalyticsAggregation()
         };
     }

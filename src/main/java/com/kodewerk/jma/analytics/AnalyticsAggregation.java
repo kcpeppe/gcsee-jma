@@ -117,6 +117,16 @@ public final class AnalyticsAggregation extends JmaAggregation {
     private long toSpaceExhaustedCount = 0;
 
     /**
+     * ZGC allocation stalls — collections triggered by
+     * {@link GCCause#ALLOC_STALL}. This is the ZGC-specific
+     * "heap too small" / "concurrent cycle didn't keep up" indicator:
+     * a mutator thread had to block waiting for free memory because
+     * the concurrent collector couldn't free pages fast enough.
+     * On non-ZGC logs this stays at zero — the cause is ZGC-only.
+     */
+    private long allocationStallCount = 0;
+
+    /**
      * Post-collection heap occupancy samples for the heap-stability
      * analytic. We keep them in arrival order so growth-trend math can
      * quartile the run; only one {@code (tSec, mb)} pair per pause that
@@ -172,14 +182,19 @@ public final class AnalyticsAggregation extends JmaAggregation {
     private long totalGcEvents = 0;
 
     /**
-     * Has at least one G1 event been observed? Drives the
-     * "analytics always show for the relevant collector" rule —
-     * collector-specific analytics (currently Mixed Collections)
-     * use this flag to decide whether to emit at all on a given
-     * log, separate from whether they happened to find anything
-     * to histogram.
+     * Collector-family detection flags. The "analytics always show
+     * for the relevant collector" rule reads these to decide which
+     * checks to emit per log: G1-specific heap-too-small indicators
+     * for G1 logs, GC-frequency check for Parallel / Serial logs,
+     * Mixed Collections only on G1, etc. {@link #detectCollector()}
+     * resolves the flags into a single canonical short name with
+     * the same priority order used by {@code SummaryAggregation}.
      */
-    private boolean g1Observed = false;
+    private boolean g1Observed       = false;
+    private boolean cmsObserved      = false;
+    private boolean parallelObserved = false;
+    private boolean serialObserved   = false;
+    private boolean zgcObserved      = false;
 
     /** Required by the GCSee module SPI. */
     public AnalyticsAggregation() {}
@@ -191,6 +206,37 @@ public final class AnalyticsAggregation extends JmaAggregation {
         if (Double.isNaN(firstEventSec)) firstEventSec = tSec;
         lastEventSec = tSec;
         if (event instanceof G1GCEvent) g1Observed = true;
+        // Generational / ZGC family detection. We match on the runtime
+        // simple class name rather than instanceof to keep the test
+        // exact and avoid inheritance surprises (e.g. ParNew → DefNew).
+        // CMS markers override Serial so a log with both CMS phases and
+        // a Serial-named young GC still resolves as CMS via detectCollector().
+        final String simpleName = event.getClass().getSimpleName();
+        switch (simpleName) {
+            case "InitialMark":
+            case "CMSRemark":
+            case "ConcurrentModeFailure":
+            case "ConcurrentModeInterrupted":
+            case "ConcurrentMark":
+            case "ConcurrentSweep":
+            case "ConcurrentPreClean":
+            case "AbortablePreClean":
+            case "ConcurrentReset":
+                cmsObserved = true;
+                break;
+            case "PSYoungGen":
+            case "PSFullGC":
+                parallelObserved = true;
+                break;
+            case "DefNew":
+            case "FullGC":
+                serialObserved = true;
+                break;
+            default:
+                // ZGC arrives via ZGCCollection — also caught here.
+                if (simpleName.startsWith("ZGC")) zgcObserved = true;
+                break;
+        }
 
         GCCause cause = event.getGCCause();
         if (cause == GCCause.JAVA_LANG_SYSTEM) {
@@ -202,6 +248,8 @@ public final class AnalyticsAggregation extends JmaAggregation {
             otherExplicitGcTimestamps.add(tSec);
         } else if (cause == GCCause.GC_LOCKER) {
             gcLockerCount++;
+        } else if (cause == GCCause.ALLOC_STALL) {
+            allocationStallCount++;
         } else if (cause == GCCause.METADATA_GENERATION_THRESHOLD) {
             metaspaceTriggeredCount++;
             // "After warmup" — first WARMUP_WINDOW_SEC seconds of observed
@@ -367,10 +415,31 @@ public final class AnalyticsAggregation extends JmaAggregation {
     public long   getConcurrentMarkAbortedCount()      { return concurrentMarkAbortedCount; }
     public long   getConcurrentMarkResetForOverflowCount() { return concurrentMarkResetForOverflowCount; }
     public long   getToSpaceExhaustedCount()           { return toSpaceExhaustedCount; }
+    public long   getAllocationStallCount()            { return allocationStallCount; }
     public java.util.List<double[]> getHeapOccupancySamples() { return heapOccupancySamples; }
     public java.util.List<double[]> getPauseEvents()          { return pauseEvents; }
     public java.util.Map<Integer, Long> getMixedRunHistogram() { return mixedRunHistogram; }
     public boolean isG1Observed()                              { return g1Observed; }
+    public boolean isCmsObserved()                             { return cmsObserved; }
+    public boolean isParallelObserved()                        { return parallelObserved; }
+    public boolean isSerialObserved()                          { return serialObserved; }
+    public boolean isZgcObserved()                             { return zgcObserved; }
+
+    /**
+     * Resolve the observed-event flags into a single collector-family
+     * tag. Same priority order as {@code SummaryAggregation}: ZGC and
+     * G1 first (their events are unique), CMS next (overrides Parallel/
+     * Serial because CMS uses ParNew + DefNew-derived young pauses),
+     * then Parallel, then Serial.
+     */
+    public String detectCollector() {
+        if (zgcObserved)      return "zgc";
+        if (g1Observed)       return "g1";
+        if (cmsObserved)      return "cms";
+        if (parallelObserved) return "parallel";
+        if (serialObserved)   return "serial";
+        return "unknown";
+    }
 
     /**
      * Best available log-duration estimate in seconds, or {@code 0.0}

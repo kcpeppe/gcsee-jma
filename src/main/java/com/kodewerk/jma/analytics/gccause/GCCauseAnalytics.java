@@ -33,13 +33,35 @@ public final class GCCauseAnalytics {
     private GCCauseAnalytics() {}
 
     public static void evaluate(AnalyticsAggregation agg, List<AnalyticsFinding> out) {
+        String collector = agg.detectCollector();
+        // On Parallel and Serial the group narrows to the two checks
+        // that map directly to operator action: explicit System.gc()
+        // calls and GCLocker-triggered collections. Full GCs are
+        // already covered by the Summary's Full-GC / total pause
+        // ratio (and are expected periodic events on these
+        // collectors), and the diagnostic-trigger finding is more
+        // useful on long-running concurrent collectors where it
+        // signals a profiler attached in production.
+        // ZGC drops the Full-GC finding for a different reason —
+        // generational ZGC has no Full GC in normal operation; an
+        // entry on the row would only fire on the emergency-fallback
+        // path, which the Summary headline already surfaces as a
+        // dedicated "Full cycles" scalar.
+        boolean isParallelOrSerial =
+                "parallel".equals(collector) || "serial".equals(collector);
+        boolean isZgc = "zgc".equals(collector);
+
         out.add(systemGc(agg));
         AnalyticsFinding periodic = systemGcPeriodicity(agg);
         if (periodic != null) out.add(periodic);
-        AnalyticsFinding explicit = otherExplicitGc(agg);
-        if (explicit != null) out.add(explicit);
+        if (!isParallelOrSerial) {
+            AnalyticsFinding explicit = otherExplicitGc(agg);
+            if (explicit != null) out.add(explicit);
+        }
         out.add(gcLocker(agg));
-        out.add(fullGc(agg));
+        if (!isParallelOrSerial && !isZgc) {
+            out.add(fullGc(agg));
+        }
     }
 
     // ---- System.gc() presence -----------------------------------------------

@@ -3,6 +3,7 @@ package com.kodewerk.jma.aggregation.summary;
 import com.kodewerk.gcsee.aggregator.Aggregates;
 import com.kodewerk.gcsee.aggregator.Aggregator;
 import com.kodewerk.gcsee.aggregator.EventSource;
+import com.kodewerk.gcsee.event.GCCause;
 import com.kodewerk.gcsee.event.MemoryPoolSummary;
 import com.kodewerk.gcsee.event.g1gc.G1FullGC;
 import com.kodewerk.gcsee.event.g1gc.G1GCPauseEvent;
@@ -12,12 +13,16 @@ import com.kodewerk.gcsee.event.generational.ConcurrentModeFailure;
 import com.kodewerk.gcsee.event.generational.ConcurrentModeInterrupted;
 import com.kodewerk.gcsee.event.generational.GenerationalGCPauseEvent;
 import com.kodewerk.gcsee.event.generational.InitialMark;
+import com.kodewerk.gcsee.event.zgc.ZGCCollection;
+import com.kodewerk.gcsee.time.DateTimeStamp;
 
 /**
  * Builds a {@link SummaryAggregation} by walking every stop-the-world
- * pause event emitted for the Generational and G1 collector families.
- * ZGC is not registered here on purpose — see the note in
- * {@link SummaryAggregation}'s class javadoc.
+ * pause event emitted for the Generational, G1, and ZGC collector
+ * families. ZGC cycles arrive as a single {@link ZGCCollection} event
+ * carrying three sub-pauses (mark-start / mark-end / relocate-start);
+ * we fold those into one row per cycle type so the summary table
+ * matches the user's mental model (one row per cycle, not three).
  * <p>
  * Per-event responsibilities:
  * <ul>
@@ -42,7 +47,7 @@ import com.kodewerk.gcsee.event.generational.InitialMark;
  * The concurrent-phases table infrastructure is in place so that a later
  * GCSee revision can start populating it without a second aggregator.
  */
-@Aggregates({EventSource.G1GC, EventSource.GENERATIONAL})
+@Aggregates({EventSource.G1GC, EventSource.GENERATIONAL, EventSource.ZGC})
 public final class SummaryAggregator extends Aggregator<SummaryAggregation> {
 
     private static final double KB_TO_MB = 1.0 / 1024.0;
@@ -61,6 +66,7 @@ public final class SummaryAggregator extends Aggregator<SummaryAggregation> {
         super(aggregation);
         register(G1GCPauseEvent.class,           this::onG1Pause);
         register(GenerationalGCPauseEvent.class, this::onGenerationalPause);
+        register(ZGCCollection.class,            this::onZgcCycle);
     }
 
     private void onG1Pause(G1GCPauseEvent event) {
@@ -87,6 +93,23 @@ public final class SummaryAggregator extends Aggregator<SummaryAggregation> {
                 || event instanceof ConcurrentModeFailure
                 || event instanceof ConcurrentModeInterrupted) {
             aggregation().markCmsSeen();
+        }
+        // Collector-family detection: Parallel and Serial don't have
+        // marker events in the way CMS does, so we use the runtime
+        // class simple name to keep the test exact (avoids accidental
+        // matching of subclasses, e.g. ParNew → DefNew if the
+        // hierarchy ever changes). PSYoungGen and PSFullGC fingerprint
+        // Parallel; DefNew without any CMS markers fingerprints Serial.
+        String name = event.getClass().getSimpleName();
+        if (name.equals("PSYoungGen") || name.equals("PSFullGC")) {
+            aggregation().markParallelSeen();
+        }
+        if (name.equals("DefNew") || name.equals("FullGC")) {
+            // CMS markers (if any) get set later in the same call chain
+            // or in a future event — collector resolution defers to
+            // detectCollector(), which prefers CMS over Serial when
+            // both flags end up set.
+            aggregation().markSerialSeen();
         }
         recordStw(event);
     }
@@ -160,5 +183,78 @@ public final class SummaryAggregator extends Aggregator<SummaryAggregation> {
         if (event instanceof G1GCPauseEvent g1)           return g1.getHeap();
         if (event instanceof GenerationalGCPauseEvent gen) return gen.getHeap();
         return null;
+    }
+
+    /**
+     * Fold a ZGC cycle into a single STW row.
+     * <p>
+     * One {@link ZGCCollection} carries up to three sub-pauses
+     * (mark-start, mark-end, relocate-start). Treating each sub-pause as
+     * its own row would triple the row count and mismatch the "rows are
+     * cycle types" mental model the rest of the page uses, so we sum the
+     * sub-pause durations into {@code totalPauseSec}, take their max as
+     * the row's {@code maxPauseSec}, and bump {@code invocations} by one
+     * per cycle. The interval running mean tracks the cycle's start
+     * timestamp (not the sub-pause timestamps) so "Interval" reads as
+     * "time between cycles of this type" — same as it does for every
+     * other row.
+     * <p>
+     * Allocation deltas: ZGC's memory bookkeeping diverges from the
+     * KB-based {@link MemoryPoolSummary} the generational families use,
+     * so we leave the {@code allocMb} / {@code recoveredMb} columns
+     * empty on ZGC rows for now. Headline-level allocation / throughput
+     * numbers come out of the dedicated allocation / heap aggregations
+     * (which already speak ZGC), so the summary doesn't need to
+     * synthesise them here.
+     */
+    private void onZgcCycle(ZGCCollection event) {
+        aggregation().markZgcSeen();
+        if (event.getGCCause() == GCCause.ALLOC_STALL) {
+            aggregation().noteAllocationStall();
+        }
+
+        String rowKey = event.getClass().getSimpleName();
+        SummaryAggregation.StwRow row = aggregation().stwRow(rowKey, rowKey);
+
+        double markStart    = nonNegative(event.getPauseMarkStartDuration());
+        double markEnd      = nonNegative(event.getPauseMarkEndDuration());
+        double relocateStrt = nonNegative(event.getPauseRelocateStartDuration());
+        double totalPauseSec = markStart + markEnd + relocateStrt;
+        double maxPauseSec   = Math.max(markStart, Math.max(markEnd, relocateStrt));
+
+        row.invocations++;
+        row.totalPauseSec += totalPauseSec;
+        if (maxPauseSec > row.maxPauseSec) row.maxPauseSec = maxPauseSec;
+
+        // Cycle start: ZGCCollection's own DateTimeStamp is the pause-mark-start
+        // moment (the first sub-pause begins the cycle); fall back to the
+        // sub-pause stamp if the event-level stamp is missing.
+        DateTimeStamp cycleStart = event.getDateTimeStamp();
+        if (cycleStart == null) cycleStart = event.getPauseMarkStartTimeStamp();
+        if (cycleStart != null) {
+            double tSec = cycleStart.toSeconds();
+            if (!Double.isNaN(row.lastStartSec)) {
+                double interval = tSec - row.lastStartSec;
+                if (interval > 0.0) {
+                    row.sumIntervalsSec += interval;
+                    row.intervalCount++;
+                }
+            }
+            row.lastStartSec = tSec;
+            // Back-to-back detection (gap between this cycle's start and
+            // the previous STW event's end). Mirrors the generational /
+            // G1 path so the headline-level note is consistent.
+            if (!Double.isNaN(prevEventEndSec)) {
+                double applicationTime = tSec - prevEventEndSec;
+                if (applicationTime < BACK_TO_BACK_THRESHOLD_SEC) {
+                    aggregation().noteBackToBack();
+                }
+            }
+            prevEventEndSec = tSec + totalPauseSec;
+        }
+    }
+
+    private static double nonNegative(double v) {
+        return v > 0.0 ? v : 0.0;
     }
 }

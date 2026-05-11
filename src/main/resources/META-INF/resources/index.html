@@ -43,9 +43,29 @@
         .sidebar .sidebar-brand {
             font-size: 14px;
             font-weight: 700;
+            margin-bottom: 2px;
+        }
+        .sidebar .sidebar-collector {
+            font-size: 11px;
+            color: #656d76;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
             margin-bottom: 12px;
             padding-bottom: 8px;
             border-bottom: 1px solid #d0d7de;
+        }
+        .sidebar .sidebar-collector .collector-tag {
+            display: inline-block;
+            padding: 1px 6px;
+            margin-left: 4px;
+            border-radius: 8px;
+            background: #ddf4ff;
+            color: #0969da;
+            font-weight: 600;
+        }
+        .sidebar .sidebar-collector.unknown .collector-tag {
+            background: #f6f8fa;
+            color: #656d76;
         }
         /* Top-level group: Summary, Analytics, Charts. Collapsible. */
         .sidebar-group { margin-bottom: 12px; }
@@ -493,9 +513,15 @@
         }
         /* Cards / subsections / page-sections are hidden when there's
            nothing to show — at home-page load all three page-sections
-           start hidden and reveal after the first successful analyze. */
+           start hidden and reveal after the first successful analyze.
+           collector-hidden is a separate marker the rail builder uses
+           to tell "this view doesn't apply to the detected collector"
+           apart from "this view is empty for this log". Either way
+           the visual outcome is display: none. */
         .chart-card.hidden,
+        .chart-card.collector-hidden,
         .chart-subsection.hidden,
+        .chart-subsection.collector-hidden,
         .page-section.hidden {
             display: none;
         }
@@ -504,6 +530,9 @@
 <body>
     <nav class="sidebar hidden" id="sidebar" aria-label="Page navigation">
         <div class="sidebar-brand">gcsee-jma</div>
+        <div class="sidebar-collector unknown" id="sidebar-collector">
+            Collector:<span class="collector-tag">—</span>
+        </div>
         <div class="sidebar-content"></div>
     </nav>
 
@@ -538,51 +567,71 @@
     <section class="chart-subsection" data-section="heap-usage">
         <h2 class="subsection-heading">Heap Usage</h2>
 
-        <div class="chart-card">
+        <div class="chart-card" data-collectors="g1,parallel,serial,cms">
             <h2>Heap size &amp; occupancy after collection</h2>
             <div class="chart-body"><canvas id="heap-occupancy"></canvas></div>
         </div>
 
-        <div class="chart-card">
+        <div class="chart-card" data-collectors="g1,parallel,serial,cms">
             <h2>Heap size &amp; occupancy before collection</h2>
             <div class="chart-body"><canvas id="heap-occupancy-before"></canvas></div>
         </div>
 
-        <div class="chart-card">
+        <div class="chart-card" data-collectors="g1">
             <h2>% heap occupancy before collection</h2>
             <div class="chart-body"><canvas id="heap-occupancy-before-percent"></canvas></div>
         </div>
 
-        <div class="chart-card">
+        <div class="chart-card" data-collectors="g1">
             <h2>% heap occupancy after collection</h2>
             <div class="chart-body"><canvas id="heap-occupancy-after-percent"></canvas></div>
+        </div>
+
+        <div class="chart-card" data-collectors="parallel,serial,cms">
+            <h2>Tenured size &amp; occupancy after collection</h2>
+            <div class="chart-body"><canvas id="tenured-occupancy"></canvas></div>
+        </div>
+
+        <div class="chart-card" data-collectors="parallel,serial,cms">
+            <h2>Tenured size &amp; occupancy before collection</h2>
+            <div class="chart-body"><canvas id="tenured-occupancy-before"></canvas></div>
         </div>
 
         <div class="chart-card">
             <h2>Metaspace size &amp; occupancy after collection</h2>
             <div class="chart-body"><canvas id="metaspace-occupancy"></canvas></div>
         </div>
+
+        <div class="chart-card" data-collectors="zgc">
+            <h2>Live at relocate start</h2>
+            <div class="chart-body"><canvas id="zgc-live-at-relocate-start"></canvas></div>
+        </div>
+
+        <div class="chart-card" data-collectors="zgc">
+            <h2>Live at relocate end</h2>
+            <div class="chart-body"><canvas id="zgc-live-at-relocate-end"></canvas></div>
+        </div>
     </section>
 
     <section class="chart-subsection" data-section="region-usage">
         <h2 class="subsection-heading">Region Usage</h2>
 
-        <div class="chart-card">
+        <div class="chart-card" data-collectors="g1">
             <h2>G1 regions before collection</h2>
             <div class="chart-body"><canvas id="g1-regions-before"></canvas></div>
         </div>
 
-        <div class="chart-card">
+        <div class="chart-card" data-collectors="g1">
             <h2>G1 regions after collection</h2>
             <div class="chart-body"><canvas id="g1-regions-after"></canvas></div>
         </div>
 
-        <div class="chart-card">
+        <div class="chart-card" data-collectors="g1">
             <h2>G1 regions before collection (% of total)</h2>
             <div class="chart-body"><canvas id="g1-regions-before-percent"></canvas></div>
         </div>
 
-        <div class="chart-card">
+        <div class="chart-card" data-collectors="g1">
             <h2>G1 regions after collection (% of total)</h2>
             <div class="chart-body"><canvas id="g1-regions-after-percent"></canvas></div>
         </div>
@@ -591,100 +640,131 @@
     <section class="chart-subsection" data-section="heap-churn">
         <h2 class="subsection-heading">Heap Churn</h2>
 
-        <div class="chart-card">
+        <div class="chart-card" data-collectors="g1,parallel,serial,cms">
             <h2>Allocated between collections</h2>
             <div class="chart-body"><canvas id="allocation-per-collection"></canvas></div>
         </div>
 
-        <div class="chart-card">
+        <div class="chart-card" data-collectors="g1,parallel,serial,cms">
             <h2>Application allocation rate</h2>
             <div class="chart-body"><canvas id="allocation-rate"></canvas></div>
         </div>
 
-        <div class="chart-card">
+        <div class="chart-card" data-collectors="g1,parallel,serial,cms">
             <h2>Recovered by each collection</h2>
             <div class="chart-body"><canvas id="recovered"></canvas></div>
         </div>
     </section>
 
-    <section class="chart-subsection" data-section="cycle-durations">
+    <section class="chart-subsection" data-section="zgc-concurrent-phases">
+        <h2 class="subsection-heading">Concurrent Phases</h2>
+
+        <div class="chart-card" data-collectors="zgc">
+            <h2>Concurrent phase durations</h2>
+            <div class="chart-body"><canvas id="zgc-concurrent-phase-durations"></canvas></div>
+        </div>
+
+        <div class="chart-card" data-collectors="zgc">
+            <h2>Cycle durations</h2>
+            <div class="chart-body"><canvas id="zgc-cycle-durations"></canvas></div>
+        </div>
+
+        <div class="chart-card" data-collectors="zgc">
+            <h2>% of cycle time per concurrent phase</h2>
+            <div class="chart-body"><canvas id="zgc-cycle-time-percent"></canvas></div>
+        </div>
+    </section>
+
+    <section class="chart-subsection" data-section="cycle-durations"
+             data-heading-parallel="Pause Time"
+             data-heading-serial="Pause Time">
         <h2 class="subsection-heading">Cycle Durations</h2>
 
-        <div class="chart-card">
+        <div class="chart-card" data-collectors="g1,parallel,serial,cms">
             <h2>Stop-the-world pause time</h2>
             <div class="chart-body"><canvas id="pause-time"></canvas></div>
         </div>
 
-        <div class="chart-card">
+        <div class="chart-card" data-collectors="g1,parallel,serial,cms">
             <h2>% time in GC over time</h2>
             <div class="chart-body"><canvas id="percent-time-in-gc"></canvas></div>
         </div>
 
-        <div class="chart-card">
+        <div class="chart-card" data-collectors="g1">
             <h2>Concurrent phase durations</h2>
             <div class="chart-body"><canvas id="concurrent-phase-duration"></canvas></div>
         </div>
 
-        <div class="chart-card">
+        <div class="chart-card" data-collectors="g1,zgc">
             <h2>Minimum mutator utilization</h2>
             <div class="chart-body"><canvas id="mmu"></canvas></div>
         </div>
 
-        <div class="chart-card">
+        <div class="chart-card" data-collectors="g1,parallel,serial,cms">
             <h2>CPU breakouts</h2>
             <div class="chart-body"><canvas id="cpu-breakouts"></canvas></div>
+        </div>
+
+        <div class="chart-card" data-collectors="zgc">
+            <h2>ZGC pause time</h2>
+            <div class="chart-body"><canvas id="zgc-pause-time"></canvas></div>
+        </div>
+
+        <div class="chart-card" data-collectors="zgc">
+            <h2>Cycle durations and intervals</h2>
+            <div class="chart-body"><canvas id="zgc-cycle-durations-and-intervals"></canvas></div>
         </div>
     </section>
 
     <section class="chart-subsection" data-section="phase-times">
         <h2 class="subsection-heading">Phase Times</h2>
 
-        <div class="chart-card">
+        <div class="chart-card" data-collectors="g1">
             <h2>G1 phase breakout</h2>
             <div class="chart-body"><canvas id="g1-phases"></canvas></div>
         </div>
 
-        <div class="chart-card">
+        <div class="chart-card" data-collectors="g1">
             <h2>G1 phase breakout (% of pause)</h2>
             <div class="chart-body"><canvas id="g1-phase-percent"></canvas></div>
         </div>
 
-        <div class="chart-card">
+        <div class="chart-card" data-collectors="g1">
             <h2>G1 Pre-Collection sub-phases</h2>
             <div class="chart-body"><canvas id="g1-pre-collection"></canvas></div>
         </div>
 
-        <div class="chart-card">
+        <div class="chart-card" data-collectors="g1">
             <h2>G1 Pre-Collection sub-phases (% of phase)</h2>
             <div class="chart-body"><canvas id="g1-pre-collection-percent"></canvas></div>
         </div>
 
-        <div class="chart-card">
+        <div class="chart-card" data-collectors="g1">
             <h2>G1 Collection sub-phases</h2>
             <div class="chart-body"><canvas id="g1-collection"></canvas></div>
         </div>
 
-        <div class="chart-card">
+        <div class="chart-card" data-collectors="g1">
             <h2>G1 Collection sub-phases (% of phase)</h2>
             <div class="chart-body"><canvas id="g1-collection-percent"></canvas></div>
         </div>
 
-        <div class="chart-card">
+        <div class="chart-card" data-collectors="g1">
             <h2>G1 Post-Collection sub-phases</h2>
             <div class="chart-body"><canvas id="g1-post-collection"></canvas></div>
         </div>
 
-        <div class="chart-card">
+        <div class="chart-card" data-collectors="g1">
             <h2>G1 Post-Collection sub-phases (% of phase)</h2>
             <div class="chart-body"><canvas id="g1-post-collection-percent"></canvas></div>
         </div>
 
-        <div class="chart-card">
+        <div class="chart-card" data-collectors="g1">
             <h2>G1 Other sub-phases</h2>
             <div class="chart-body"><canvas id="g1-other-collection"></canvas></div>
         </div>
 
-        <div class="chart-card">
+        <div class="chart-card" data-collectors="g1">
             <h2>G1 Other sub-phases (% of phase)</h2>
             <div class="chart-body"><canvas id="g1-other-collection-percent"></canvas></div>
         </div>
@@ -693,22 +773,22 @@
     <section class="chart-subsection" data-section="misc">
         <h2 class="subsection-heading">Misc</h2>
 
-        <div class="chart-card">
+        <div class="chart-card" data-collectors="g1,parallel,serial,cms">
             <h2>Reference processing count</h2>
             <div class="chart-body"><canvas id="reference-count"></canvas></div>
         </div>
 
-        <div class="chart-card">
+        <div class="chart-card" data-collectors="g1,parallel,serial,cms">
             <h2>Reference processing time</h2>
             <div class="chart-body"><canvas id="reference-time"></canvas></div>
         </div>
 
-        <div class="chart-card">
+        <div class="chart-card" data-collectors="g1,parallel,serial,cms">
             <h2>Safepoint duration</h2>
             <div class="chart-body"><canvas id="safepoint-duration"></canvas></div>
         </div>
 
-        <div class="chart-card">
+        <div class="chart-card" data-collectors="g1,parallel,serial,cms">
             <h2>Safepoint cause counts</h2>
             <div class="chart-body"><canvas id="safepoint-cause"></canvas></div>
         </div>
@@ -717,27 +797,32 @@
             <h2>GC cause by collection type</h2>
             <div class="chart-body"><canvas id="gc-cause"></canvas></div>
         </div>
+
+        <div class="chart-card" data-collectors="zgc">
+            <h2>System load (1m / 5m / 15m)</h2>
+            <div class="chart-body"><canvas id="zgc-system-load"></canvas></div>
+        </div>
     </section>
 
     <section class="chart-subsection" data-section="tenuring">
         <h2 class="subsection-heading">Tenuring</h2>
 
-        <div class="chart-card summary-card">
+        <div class="chart-card summary-card" data-collectors="g1,parallel,serial,cms">
             <h2>Tenuring distribution summary</h2>
             <div class="summary-body" id="tenuring-summary"></div>
         </div>
 
-        <div class="chart-card">
+        <div class="chart-card" data-collectors="g1">
             <h2>Tenuring distribution</h2>
             <div class="chart-body"><canvas id="tenuring-volume"></canvas></div>
         </div>
 
-        <div class="chart-card">
+        <div class="chart-card" data-collectors="g1">
             <h2>Tenuring over time</h2>
             <div class="chart-body"><canvas id="tenuring-over-time"></canvas></div>
         </div>
 
-        <div class="chart-card">
+        <div class="chart-card" data-collectors="g1,parallel,serial,cms">
             <h2>Calculated tenuring thresholds</h2>
             <div class="chart-body"><canvas id="tenuring-threshold"></canvas></div>
         </div>
@@ -1111,6 +1196,137 @@
         }
     }
 
+    /**
+     * Drop any collector-incompatibility marks from a previous log so
+     * the next analyze can re-evaluate from scratch. Also reset the
+     * sidebar's collector indicator to the unknown / placeholder state
+     * while the new fetches are in flight.
+     */
+    function clearCollectorFilter() {
+        document.querySelectorAll('.collector-hidden').forEach(el => {
+            el.classList.remove('collector-hidden');
+        });
+        updateCollectorTag('unknown');
+    }
+
+    /**
+     * Walk every chart-card carrying a {@code data-collectors} attribute
+     * and mark the ones whose list doesn't include the detected
+     * collector as collector-hidden. Promote the marker to the parent
+     * subsection when every card inside it is collector-hidden. Cards
+     * without {@code data-collectors} are collector-agnostic and
+     * untouched. Called after the per-render visibility settles so
+     * the empty-data {@code hidden} marker and the collector-hidden
+     * marker don't fight each other.
+     */
+    function applyCollectorFilter(collector) {
+        // Show the detected collector tag in the sidebar regardless of
+        // whether filtering does anything — operator needs to know
+        // what was detected even when the answer is "unknown".
+        updateCollectorTag(collector);
+        applyCollectorHeadings(collector);
+        if (!collector || collector === 'unknown') {
+            // No reliable detection — leave everything visible and let
+            // the empty-data filter handle the rest.
+            return;
+        }
+        document.querySelectorAll('.chart-card[data-collectors]').forEach(card => {
+            const allowed = card.dataset.collectors
+                    .split(',').map(s => s.trim()).filter(Boolean);
+            if (!allowed.includes(collector)) {
+                card.classList.add('collector-hidden');
+            }
+        });
+        document.querySelectorAll('.chart-subsection').forEach(sub => {
+            const cards = sub.querySelectorAll('.chart-card');
+            if (cards.length === 0) return;
+            const allHidden = Array.from(cards)
+                    .every(c => c.classList.contains('collector-hidden'));
+            if (allHidden) sub.classList.add('collector-hidden');
+        });
+    }
+
+    /**
+     * Project the tenuring-summary view onto the subset of headlines
+     * and tables that applies for the detected collector. On Parallel
+     * and Serial the JVM resets the tenuring age across collections,
+     * so premature-promotion accounting and the threshold-distribution
+     * table aren't meaningful — keep only the headline scalars the
+     * operator can actually act on (max threshold, desired survivor
+     * occupancy, collection count) plus the per-age breakdown table.
+     * On any other collector (G1) the view is returned unchanged.
+     */
+    function filterTenuringSummaryForCollector(view, collector) {
+        if (!view?.aggregation?.data) return view;
+        if (collector !== 'parallel' && collector !== 'serial') return view;
+        const KEEP_HEADLINES = new Set([
+            'Max tenuring threshold',
+            'Desired survivor occupancy',
+            'Collections'
+        ]);
+        const DROP_TABLES = new Set(['tenuring-threshold-distribution']);
+        const orig = view.aggregation.data;
+        const filtered = {
+            ...orig,
+            headline: (orig.headline || []).filter(h => KEEP_HEADLINES.has(h.label)),
+            tables:   (orig.tables   || []).filter(t => !DROP_TABLES.has(t.key))
+        };
+        return {
+            ...view,
+            aggregation: { ...view.aggregation, data: filtered }
+        };
+    }
+
+    /**
+     * Swap a subsection's heading text per detected collector when
+     * the markup declares an override via {@code data-heading-<name>}
+     * (e.g. {@code data-heading-parallel="Pause Time"}). The original
+     * heading text is stashed on first call so subsequent analyses
+     * — possibly on a different collector — can revert. Runs before
+     * {@code buildSidebar}, which reads the heading text to label the
+     * rail entry.
+     */
+    function applyCollectorHeadings(collector) {
+        const key = collector
+                ? 'heading' + collector.charAt(0).toUpperCase() + collector.slice(1)
+                : null;
+        document.querySelectorAll('.chart-subsection').forEach(sub => {
+            const heading = sub.querySelector('.subsection-heading');
+            if (!heading) return;
+            if (!heading.dataset.original) {
+                heading.dataset.original = heading.textContent;
+            }
+            const override = key ? sub.dataset[key] : null;
+            heading.textContent = override || heading.dataset.original;
+        });
+    }
+
+    /**
+     * Stamp the detected collector into the sidebar header so the
+     * operator can see which collector the page is filtered for.
+     * Maps the short tags the backend emits onto human-readable
+     * labels (G1, Parallel, Serial, CMS, ZGC).
+     */
+    function updateCollectorTag(collector) {
+        const wrap = document.getElementById('sidebar-collector');
+        if (!wrap) return;
+        const tag = wrap.querySelector('.collector-tag');
+        if (!tag) return;
+        const label = collectorLabel(collector);
+        tag.textContent = label;
+        wrap.classList.toggle('unknown', !collector || collector === 'unknown');
+    }
+    function collectorLabel(c) {
+        switch (c) {
+            case 'g1':       return 'G1';
+            case 'parallel': return 'Parallel';
+            case 'serial':   return 'Serial';
+            case 'cms':      return 'CMS';
+            case 'zgc':      return 'ZGC';
+            default:         return 'Unknown';
+        }
+    }
+
     /** Reveal Summary, Analytics and Charts after a successful analyze. */
     function revealResultSections() {
         document.querySelectorAll('.page-section').forEach(s => s.classList.remove('hidden'));
@@ -1183,16 +1399,28 @@
         const section = document.getElementById('section-charts');
         if (!section) return;
         const grp = makeGroupSkeleton('Charts', section);
-        section.querySelectorAll('.chart-subsection').forEach((sub, subIdx) => {
+        // Walk subsections; skip any whose collector-hidden flag is set
+        // (entirely incompatible with the detected collector). Renumber
+        // consecutively over what's left so the rail reads 1, 2, 3, …
+        // even when, say, "Region Usage" drops out on a Parallel log.
+        let subNum = 0;
+        section.querySelectorAll('.chart-subsection').forEach(sub => {
+            if (sub.classList.contains('collector-hidden')) return;
+            subNum++;
             const subTitle = sub.querySelector('.subsection-heading')?.textContent || '';
             const subHidden = sub.classList.contains('hidden');
-            const subNum = subIdx + 1;
             const subSk = makeSubsectionSkeleton(
                     `${subNum}. ${subTitle}`, sub, subHidden);
-            sub.querySelectorAll('.chart-card').forEach((card, cIdx) => {
+            // Same renumbering inside the subsection — skip cards that
+            // are collector-hidden; chart number tracks visible
+            // entries only.
+            let cardNum = 0;
+            sub.querySelectorAll('.chart-card').forEach(card => {
+                if (card.classList.contains('collector-hidden')) return;
+                cardNum++;
                 const cardTitle = card.querySelector('h2')?.textContent || '';
                 subSk.body.appendChild(makeItem({
-                    number:   `${subNum}.${cIdx + 1}`,
+                    number:   `${subNum}.${cardNum}`,
                     label:    cardTitle,
                     target:   card,
                     disabled: card.classList.contains('hidden')
@@ -1899,9 +2127,12 @@
         goBtn.disabled = true;
         setStatus(`Uploading ${file.name} (${Math.round(file.size / 1024)} KB)…`);
         // New analyze == fresh state: drop any zoom that was set on
-        // the previous log so this one starts un-zoomed.
+        // the previous log so this one starts un-zoomed, exit any
+        // expanded card, and clear collector-incompatibility marks
+        // so the next round can re-evaluate from scratch.
         resetZoomState();
         exitCardFullscreen();
+        clearCollectorFilter();
         try {
             const { id } = await upload(file);
             setStatus(`Parsed. Session ${id}. Loading views…`);
@@ -1910,6 +2141,7 @@
             // chart cards / subsections still hide on empty data).
             revealResultSections();
             const [heap, heapBefore, heapBeforePct, heapAfterPct,
+                   tenuredAfter, tenuredBefore,
                    meta, pause, pctTimeInGc, mmu, concurrentPhase, cpuBreakouts,
                    alloc, allocPerColl, recovered,
                    summary, g1Phases, g1PhasePct,
@@ -1918,11 +2150,16 @@
                    g1RegBefore, g1RegAfter, g1RegBeforePct, g1RegAfterPct,
                    tenuringSummary, tenuringVolume, tenuringThreshold, tenuringOverTime,
                    gcCause, refCount, refTime, safepointDur, safepointCause,
+                   zgcLiveStart, zgcLiveEnd, zgcConcurrentPhases,
+                   zgcCycleDur, zgcCyclePct, zgcPause,
+                   zgcCycleDurInt, zgcSysLoad,
                    analytics] = await Promise.all([
                 fetchView(id, 'heap-occupancy'),
                 fetchView(id, 'heap-occupancy-before'),
                 fetchView(id, 'heap-occupancy-before-percent'),
                 fetchView(id, 'heap-occupancy-after-percent'),
+                fetchView(id, 'tenured-occupancy'),
+                fetchView(id, 'tenured-occupancy-before'),
                 fetchView(id, 'metaspace-occupancy'),
                 fetchView(id, 'pause-time'),
                 fetchView(id, 'percent-time-in-gc'),
@@ -1956,12 +2193,22 @@
                 fetchView(id, 'reference-time'),
                 fetchView(id, 'safepoint-duration'),
                 fetchView(id, 'safepoint-cause'),
+                fetchView(id, 'zgc-live-at-relocate-start'),
+                fetchView(id, 'zgc-live-at-relocate-end'),
+                fetchView(id, 'zgc-concurrent-phase-durations'),
+                fetchView(id, 'zgc-cycle-durations'),
+                fetchView(id, 'zgc-cycle-time-percent'),
+                fetchView(id, 'zgc-pause-time'),
+                fetchView(id, 'zgc-cycle-durations-and-intervals'),
+                fetchView(id, 'zgc-system-load'),
                 fetchView(id, 'analytics')
             ]);
             render('heap-occupancy',                heap);
             render('heap-occupancy-before',         heapBefore);
             render('heap-occupancy-before-percent', heapBeforePct);
             render('heap-occupancy-after-percent',  heapAfterPct);
+            render('tenured-occupancy',         tenuredAfter);
+            render('tenured-occupancy-before',  tenuredBefore);
             render('metaspace-occupancy', meta);
             render('pause-time',          pause);
             render('percent-time-in-gc',  pctTimeInGc);
@@ -1985,7 +2232,15 @@
             renderStackedScatter('g1-regions-after',          g1RegAfter);
             renderStackedScatter('g1-regions-before-percent', g1RegBeforePct);
             renderStackedScatter('g1-regions-after-percent',  g1RegAfterPct);
-            renderSummary('tenuring-summary',     tenuringSummary);
+            // On Parallel and Serial the tenuring-age accounting can't
+            // detect premature promotion, so we project the summary
+            // onto the fields that still make sense (max threshold,
+            // desired survivor occupancy, collection count, per-age
+            // breakdown table). filterTenuringSummaryForCollector is
+            // a pass-through on G1.
+            const collectorForFilter = summary?.aggregation?.data?.collector;
+            renderSummary('tenuring-summary',
+                    filterTenuringSummaryForCollector(tenuringSummary, collectorForFilter));
             renderXYScatter('tenuring-volume',    tenuringVolume);
             renderXYScatter('tenuring-threshold', tenuringThreshold);
             renderXYScatter('tenuring-over-time', tenuringOverTime);
@@ -1994,8 +2249,24 @@
             renderXYScatter('reference-time',           refTime);
             renderXYScatter('safepoint-duration',       safepointDur);
             renderCategoryStackedBar('safepoint-cause', safepointCause);
+            // ZGC chart batch — scatter renderer for the GCCategory-keyed
+            // live charts (same shape as heap-occupancy), XY renderer for
+            // the named-series charts (pause sub-types, cycle types, load
+            // averages, concurrent-phase durations and percent).
+            render('zgc-live-at-relocate-start',      zgcLiveStart);
+            render('zgc-live-at-relocate-end',        zgcLiveEnd);
+            renderXYScatter('zgc-concurrent-phase-durations', zgcConcurrentPhases);
+            renderXYScatter('zgc-cycle-durations',            zgcCycleDur);
+            renderXYScatter('zgc-cycle-time-percent',         zgcCyclePct);
+            renderXYScatter('zgc-pause-time',                 zgcPause);
+            renderXYScatter('zgc-cycle-durations-and-intervals', zgcCycleDurInt);
+            renderXYScatter('zgc-system-load',                zgcSysLoad);
             renderSummary('summary', summary);
             renderAnalytics(analytics);
+            // Apply collector-aware filtering before the subsection
+            // cascade so a subsection that's empty AND wholly
+            // collector-hidden gets the right marker for the rail.
+            applyCollectorFilter(summary?.aggregation?.data?.collector);
             // After every chart renderer has set its card visibility,
             // hide subsections whose cards are all empty.
             hideEmptySubsections();

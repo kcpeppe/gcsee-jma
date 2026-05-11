@@ -74,10 +74,40 @@ public final class HeapUsageAnalytics {
 
     private HeapUsageAnalytics() {}
 
+    /**
+     * GC-frequency threshold (events/second) above which the Parallel /
+     * Serial heap-too-small check considers the rate concerning. More
+     * than 5 collections in a single one-second window is the rule of
+     * thumb: a healthy heap pauses for GC dozens of times per minute,
+     * not several times per second.
+     */
+    public static final int GC_FREQUENCY_THRESHOLD_PER_SEC = 5;
+
     public static void evaluate(AnalyticsAggregation agg, List<AnalyticsFinding> out) {
-        out.add(prematurePromotion(agg));
+        String collector = agg.detectCollector();
+        // Premature promotion is currently only meaningful on G1 logs;
+        // for Parallel / Serial we defer the analytic until we have a
+        // better proxy (high recovery rate in tenured) and emit nothing
+        // rather than a misleading reading. Generational ZGC resets
+        // tenuring on every cycle so the tenuring-age fingerprint is
+        // unavailable there — deferred per the same reasoning.
+        if ("g1".equals(collector)) {
+            out.add(prematurePromotion(agg));
+        }
         out.add(metaspaceTriggered(agg));
-        out.add(heapTooSmall(agg));
+        if ("zgc".equals(collector)) {
+            // ZGC has no Full GC or G1 marking-overflow events in steady
+            // state, and is sized too coarsely for the 1-second-bucket
+            // GC-frequency check (its cycles span seconds). Allocation
+            // stalls are the canonical "heap too small / concurrent
+            // cycle can't keep up" signal — the mutator literally
+            // blocked waiting for the collector to free pages.
+            out.add(heapTooSmallByAllocationStalls(agg));
+        } else if ("parallel".equals(collector) || "serial".equals(collector)) {
+            out.add(heapTooSmallByGcFrequency(agg));
+        } else {
+            out.add(heapTooSmall(agg));
+        }
         out.add(heapStability(agg));
     }
 
@@ -230,6 +260,193 @@ public final class HeapUsageAnalytics {
                 heap.
                   • For G1, raise -XX:G1ReservePercent if to-space \
                 exhaustion is the dominant indicator.""";
+        return new AnalyticsFinding(GROUP, "Heap-too-small indicators",
+                impact, message, details);
+    }
+
+    // ---- Heap too small — Parallel / Serial (GC-frequency based) -----------
+
+    /**
+     * Frequency-based heap-too-small check for the stop-the-world
+     * generational collectors (Parallel, Serial). The G1 indicators
+     * — concurrent-mark abort, reset-for-overflow, to-space exhausted
+     * — don't exist here, so we lean on raw GC rate instead. A healthy
+     * heap pauses dozens of times per minute; multiple GCs inside a
+     * single second is a strong signal the heap is too small for the
+     * working set.
+     * <p>
+     * Method: bucket pause-event start times into fixed 1-second slots
+     * starting at the first observed event. Bucket count exceeding
+     * {@link #GC_FREQUENCY_THRESHOLD_PER_SEC} flags that second as
+     * violating. Severity escalates with the share of log time that
+     * was violating, with a separate eye on the worst-second rate.
+     */
+    private static AnalyticsFinding heapTooSmallByGcFrequency(AnalyticsAggregation agg) {
+        List<double[]> events = agg.getPauseEvents();
+        double duration = agg.getLogDurationSec();
+        if (events.size() < 5 || duration < 2.0) {
+            return new AnalyticsFinding(GROUP, "Heap-too-small indicators",
+                    Impact.OK,
+                    "Not enough pause events to assess GC frequency.",
+                    "");
+        }
+
+        double firstSec = events.get(0)[0];
+        double lastSec  = events.get(events.size() - 1)[0];
+        int bucketCount = Math.max(1, (int) Math.ceil(lastSec - firstSec) + 1);
+        int[] buckets = new int[bucketCount];
+        for (double[] e : events) {
+            int idx = (int) Math.floor(e[0] - firstSec);
+            if (idx < 0) idx = 0;
+            if (idx >= bucketCount) idx = bucketCount - 1;
+            buckets[idx]++;
+        }
+        int maxRate = 0;
+        int violatingBuckets = 0;
+        for (int b : buckets) {
+            if (b > maxRate) maxRate = b;
+            if (b > GC_FREQUENCY_THRESHOLD_PER_SEC) violatingBuckets++;
+        }
+        double violatingFraction = bucketCount > 0
+                ? (double) violatingBuckets / bucketCount
+                : 0.0;
+
+        Impact impact;
+        if (maxRate <= GC_FREQUENCY_THRESHOLD_PER_SEC) {
+            impact = Impact.OK;
+        } else if (violatingFraction >= 0.10) {
+            // More than 10 % of the log spent over the threshold —
+            // the heap pressure is sustained, not a one-off burst.
+            impact = Impact.SIGNIFICANT;
+        } else {
+            impact = Impact.CONCERNING;
+        }
+
+        String message;
+        if (impact == Impact.OK) {
+            message = String.format(Locale.ROOT,
+                    "No 1-second window had more than %d GC events "
+                    + "(worst observed: %d events in one second across %d analysed).",
+                    GC_FREQUENCY_THRESHOLD_PER_SEC, maxRate, bucketCount);
+        } else {
+            message = String.format(Locale.ROOT,
+                    "GC fired more than %d times in %d second(s) of the log "
+                    + "(worst observed: %d events in one second across %d analysed, "
+                    + "%.1f%% of seconds exceeded the threshold).",
+                    GC_FREQUENCY_THRESHOLD_PER_SEC, violatingBuckets,
+                    maxRate, bucketCount, violatingFraction * 100.0);
+        }
+
+        if (impact == Impact.OK) {
+            return new AnalyticsFinding(GROUP, "Heap-too-small indicators",
+                    impact, message, "");
+        }
+        String details = """
+                Parallel and Serial collectors don't expose the same
+                "fell behind" signals G1 does (concurrent-mark abort,
+                to-space exhausted, reset-for-overflow). The most
+                reliable substitute is raw GC frequency: a healthy
+                heap pauses for GC dozens of times per minute, with
+                comfortable application-time gaps between collections.
+                Multiple collections inside a single second mean the
+                heap is filling faster than the application has time
+                to do useful work — almost always heap-size pressure.
+
+                Mitigations (in rough order of safety):
+                  • Raise -Xmx so the young generation has more room \
+                between collections.
+                  • If the young generation alone is undersized, raise \
+                -XX:NewRatio / -Xmn — short-lived objects then get \
+                more chances to die before a young GC kicks in.
+                  • If allocation rate is high but live set is small, \
+                investigate whether the application can be made to \
+                allocate less aggressively (object reuse, primitive \
+                arrays, off-heap buffers).
+                  • Consider switching to a low-pause collector (G1, \
+                ZGC) if pause latency matters more than throughput.""";
+        return new AnalyticsFinding(GROUP, "Heap-too-small indicators",
+                impact, message, details);
+    }
+
+    // ---- Heap too small — ZGC (allocation-stall based) ----------------------
+
+    /**
+     * Stall-rate threshold (events / minute) at or above which the ZGC
+     * heap-too-small finding tips from CONCERNING into SIGNIFICANT.
+     * Picked to match the operational rule of thumb that any sustained
+     * stall rate measurable in stalls-per-minute is intolerable: a
+     * healthy ZGC log carries zero stalls. One a minute is loud enough
+     * to be noticed by end-users on a latency-sensitive workload.
+     */
+    private static final double ALLOC_STALL_RATE_SIGNIFICANT_PER_MIN = 1.0;
+
+    /**
+     * Allocation-stall-based heap-too-small check for generational ZGC.
+     * Counts {@link com.kodewerk.gcsee.event.GCCause#ALLOC_STALL}
+     * events — collections where a mutator thread blocked waiting for
+     * the collector to free pages. ZGC is designed to keep up
+     * concurrently; any stall means it didn't, almost always because
+     * the heap is too small for the allocation rate (or the soft-max
+     * ceiling is undersized) so the cycle started too late or
+     * couldn't finish in time.
+     */
+    private static AnalyticsFinding heapTooSmallByAllocationStalls(AnalyticsAggregation agg) {
+        long stalls = agg.getAllocationStallCount();
+        double logDur = agg.getLogDurationSec();
+        double perMinute = (logDur > 0.0) ? stalls * 60.0 / logDur : 0.0;
+
+        if (stalls == 0) {
+            return new AnalyticsFinding(GROUP, "Heap-too-small indicators",
+                    Impact.OK,
+                    "No allocation stalls observed — ZGC kept up with the application's allocation rate.",
+                    "");
+        }
+
+        Impact impact = (perMinute >= ALLOC_STALL_RATE_SIGNIFICANT_PER_MIN)
+                ? Impact.SIGNIFICANT
+                : Impact.CONCERNING;
+
+        String message;
+        if (logDur > 0.0) {
+            message = String.format(Locale.ROOT,
+                    "%d allocation stall(s) over %.1f s of log (%.2f stalls / minute). "
+                    + "Mutator threads were blocked waiting for the collector to free pages.",
+                    stalls, logDur, perMinute);
+        } else {
+            message = String.format(Locale.ROOT,
+                    "%d allocation stall(s) observed. Mutator threads were blocked "
+                    + "waiting for the collector to free pages.",
+                    stalls);
+        }
+
+        String details = """
+                ZGC schedules its work concurrently — pause times are bounded \
+                regardless of heap size, and the mutator threads only block for \
+                the three short stop-the-world sub-pauses per cycle. An allocation \
+                stall (GCCause = "Allocation Stall") fires when a mutator asks \
+                for memory and ZGC has none free: the concurrent cycle didn't \
+                start early enough, or didn't finish fast enough, to keep ahead \
+                of the allocation rate. The thread blocks for the duration of \
+                the next cycle's relocation phase — orders of magnitude longer \
+                than a normal STW pause.
+
+                On a healthy ZGC log this counter is zero. Any non-zero count \
+                is a heap-sizing or soft-max signal:
+
+                Mitigations (in rough order of safety):
+                  • Raise -Xmx so each cycle has more room to free before the \
+                next one needs to start.
+                  • Lower -XX:SoftMaxHeapSize if you've capped it artificially \
+                — the soft-max controls when ZGC starts the next cycle, and \
+                an undersized soft-max can stall the application even though \
+                physical memory is available.
+                  • For generational ZGC, check that the young generation is \
+                large enough — most allocations should die young; if survivor \
+                pressure is high the old-gen cycle has more to do per pass.
+                  • Investigate allocation rate spikes — short bursts can \
+                outrun even a generously sized ZGC. The "Heap Stability" \
+                finding above flags steady-state growth; bursty allocation \
+                won't show there but will produce stalls.""";
         return new AnalyticsFinding(GROUP, "Heap-too-small indicators",
                 impact, message, details);
     }
