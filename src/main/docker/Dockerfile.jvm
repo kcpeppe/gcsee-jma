@@ -1,0 +1,49 @@
+# Quarkus uber-jar runtime image.
+#
+# This Dockerfile only assembles the runtime image around an
+# already-built JAR — it does NOT compile the project. The release
+# workflow (.github/workflows/release.yml) runs `mvn package` first,
+# then `docker build` against this file.
+#
+# To rebuild locally without the workflow:
+#
+#     mvn -DskipTests -Dquarkus.package.jar.type=uber-jar package
+#     docker build -f src/main/docker/Dockerfile.jvm -t gcsee-jma:local .
+#     docker run --rm -p 8080:8080 gcsee-jma:local
+#     # then open http://localhost:8080
+#
+# Why eclipse-temurin instead of one of the Quarkus official base
+# images: temurin is the canonical OpenJDK distribution, it publishes
+# multi-arch manifests covering linux/amd64 and linux/arm64 (so the
+# release workflow can emit one image manifest for both), and we have
+# no native-image, debug-symbol, or JDK-tool requirements that the
+# minimal -jre tag doesn't already cover.
+FROM eclipse-temurin:25-jre
+
+# Run as a non-root user. The app never needs to write outside the
+# upload directory (which it creates under /tmp by default), so a
+# rootless container shaves attack surface for free.
+RUN useradd --create-home --uid 1001 jma
+
+WORKDIR /app
+
+# Glob the uber-jar by its -runner suffix so the same Dockerfile
+# works across releases without the version baked in.
+COPY --chown=jma:jma target/*-runner.jar /app/gcsee-jma.jar
+
+USER jma
+
+EXPOSE 8080
+
+# Bind to all interfaces so the container's published port is
+# reachable from the host. JAVA_OPTS lets users add JVM tuning
+# (e.g. -Xmx2g) without rebuilding the image:
+#
+#     docker run -e JAVA_OPTS="-Xmx2g" -p 8080:8080 ghcr.io/.../gcsee-jma:latest
+ENV QUARKUS_HTTP_HOST=0.0.0.0
+ENV JAVA_OPTS=""
+
+# Shell form via `sh -c` so $JAVA_OPTS is word-split; `exec` so the
+# java process replaces the shell and inherits PID 1, which keeps
+# Ctrl-C / `docker stop` signal forwarding sane.
+ENTRYPOINT ["sh", "-c", "exec java $JAVA_OPTS -jar /app/gcsee-jma.jar"]

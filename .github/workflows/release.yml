@@ -1,0 +1,133 @@
+# Release workflow.
+#
+# Triggered by pushing a tag matching v* (e.g. v0.1.0). Produces a
+# Quarkus uber-jar, attaches it to a new GitHub Release at that tag,
+# and publishes a multi-arch container image to GitHub Container
+# Registry (ghcr.io) tagged with both the version and "latest".
+#
+# To cut a release:
+#
+#     git tag v0.1.0
+#     git push origin v0.1.0
+#
+# The "workflow_dispatch" trigger below lets you run the same flow
+# from the Actions tab without a tag push — handy for retrying a
+# failed release after fixing the workflow itself.
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g. v0.1.0). Must already exist.'
+        required: true
+
+# Default token only has read scope; we need write for both the
+# Releases API and the GHCR push.
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '25'
+          cache: 'maven'
+
+      - name: Resolve version from tag
+        id: vars
+        run: |
+          # Strip the leading 'v' so artifact filenames read 0.1.0
+          # rather than v0.1.0. The release / image tags themselves
+          # keep the 'v' prefix (standard Git convention).
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          VERSION="${TAG#v}"
+          echo "tag=$TAG"         >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Build uber-jar
+        run: |
+          # uber-jar packaging shades every runtime dependency into
+          # one self-contained file. Slightly slower cold start than
+          # the default fast-jar layout, much friendlier as a release
+          # artifact (one file vs. a directory of ~150).
+          mvn -B -DskipTests \
+              -Dquarkus.package.jar.type=uber-jar \
+              package
+
+      - name: Rename release JAR to match tag
+        id: stage
+        run: |
+          # The pom carries a -SNAPSHOT version, so Quarkus emits e.g.
+          # gcsee-jma-0.1.0-SNAPSHOT-runner.jar. Rename to a clean
+          # gcsee-jma-<version>.jar so the file users download has a
+          # name that unambiguously matches the release.
+          SRC=$(ls target/*-runner.jar | head -1)
+          DST="gcsee-jma-${{ steps.vars.outputs.version }}.jar"
+          cp "$SRC" "$DST"
+          echo "jar=$DST" >> "$GITHUB_OUTPUT"
+
+      - name: Create / update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.vars.outputs.tag }}
+          name: ${{ steps.vars.outputs.tag }}
+          files: ${{ steps.stage.outputs.jar }}
+          # Auto-generated release notes pull commit / PR titles
+          # since the previous tag. Override per-release in the
+          # Releases UI if a hand-written summary reads better.
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+
+      # --- Container image to GHCR --------------------------------------------
+      #
+      # buildx + qemu let us produce a single multi-arch manifest
+      # covering linux/amd64 and linux/arm64. JVM apps don't need
+      # platform-specific compilation (the JAR is byte-identical), so
+      # multi-arch costs almost nothing here — buildx just emits a
+      # different image manifest per platform that points at the same
+      # JAR layer.
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve image name
+        id: image
+        run: |
+          # Container registry path components must be lower-case;
+          # the GitHub repo owner / name may not be.
+          REPO="${{ github.repository }}"
+          echo "name=ghcr.io/${REPO,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push container image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: src/main/docker/Dockerfile.jvm
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: |
+            ${{ steps.image.outputs.name }}:${{ steps.vars.outputs.tag }}
+            ${{ steps.image.outputs.name }}:latest
