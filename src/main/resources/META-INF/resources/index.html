@@ -6,6 +6,15 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <!-- Chart.js v4.4.4 bundled locally under /vendor so the page works offline. -->
     <script src="vendor/chart.umd.js"></script>
+    <!-- Guide-line drawing uses a small in-page Chart.js plugin defined
+         alongside the rest of the JS module. The previous approach
+         (chartjs-plugin-annotation v3.0.1) hit a "Recursion detected:
+         _scriptable->_scriptable" error in Chart.js v4.4.4's option
+         resolver — its registered defaults exposed option keys the
+         resolver iterated as non-strings, blowing the stack before any
+         data could render. A hand-rolled plugin avoids the entire
+         scriptable-option surface area: just draws lines in
+         afterDatasetsDraw and hit-tests clicks in onCanvasClick. -->
     <style>
         * { box-sizing: border-box; }
         body {
@@ -233,6 +242,120 @@
             background: #eaeef2;
             color: #1f2328;
         }
+        /* Guide-line buttons — vertical and horizontal reference-line
+           pickers. Same shape as the expand button, positioned to its
+           left. The "armed" state (one is waiting for the next click)
+           gets a coloured background; the chart canvas underneath
+           changes its cursor to crosshair to telegraph the next click
+           will drop the line. */
+        .chart-guide-btn {
+            position: absolute;
+            top: 6px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 26px;
+            height: 26px;
+            background: transparent;
+            border: 0;
+            border-radius: 4px;
+            color: #656d76;
+            cursor: pointer;
+            line-height: 0;
+            padding: 0;
+        }
+        .chart-guide-btn.vrule { right: 70px; }
+        .chart-guide-btn.hrule { right: 38px; }
+        /* The zoom slider and guide-drop buttons are per-card controls
+           that are only useful when the card is large enough to
+           interact with — in the grid view they add visual noise
+           without adding much value. Hide them by default and reveal
+           them when the card is fullscreened. The expand button stays
+           visible everywhere (it's how you get to fullscreen) and the
+           "Clear guides" header button stays visible because it's a
+           global action, not a per-card one. */
+        .chart-card .chart-zoom-bar { display: none; }
+        .chart-card.card-fullscreen .chart-zoom-bar { display: flex; }
+        .chart-card .chart-guide-btn { display: none; }
+        .chart-card.card-fullscreen .chart-guide-btn { display: inline-flex; }
+        .chart-guide-btn:hover {
+            background: #eaeef2;
+            color: #1f2328;
+        }
+        .chart-guide-btn.armed {
+            background: #d4e7ff;
+            color: #0969da;
+        }
+        body.guides-armed .chart-card canvas { cursor: crosshair; }
+        /* Hover popup shown when the cursor is over a placed guide. The
+           popup is a single shared element repositioned per hover —
+           cheaper than one popup per guide. */
+        .guide-popup {
+            position: fixed;
+            display: none;
+            z-index: 200;
+            background: #ffffff;
+            border: 1px solid #d0d7de;
+            border-radius: 6px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+            padding: 8px 10px;
+            font-size: 12px;
+            color: #1f2328;
+            pointer-events: none;
+            max-width: 280px;
+            line-height: 1.4;
+        }
+        .guide-popup .guide-popup-label {
+            font-weight: 600;
+            margin-bottom: 2px;
+        }
+        .guide-popup .guide-popup-meta { color: #656d76; }
+        /* Inline editable guide label rendered on the source chart.
+           chartjs-plugin-annotation's own label is read-only — we
+           replace it with an absolutely-positioned span that flips
+           into contenteditable on click. */
+        .guide-label-tag {
+            position: absolute;
+            background: rgba(255,255,255,0.92);
+            border: 1px solid var(--guide-color, #656d76);
+            color: var(--guide-color, #1f2328);
+            border-radius: 4px;
+            padding: 2px 6px;
+            font-size: 11px;
+            font-weight: 600;
+            font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+            line-height: 1.2;
+            cursor: text;
+            user-select: none;
+            white-space: nowrap;
+            z-index: 5;
+            transform: translate(-50%, -50%);
+            min-width: 18px;
+            outline: none;
+        }
+        .guide-label-tag.editing {
+            background: #fff;
+            user-select: text;
+        }
+        /* "Clear guides" header pill. Sits in the upload bar next to
+           Analyze so it's reachable from any scroll position once the
+           sidebar's been revealed. Hidden until at least one guide
+           exists — no point advertising a no-op button. */
+        .guides-clear-btn {
+            display: none;
+            margin-left: 12px;
+            background: #f6f8fa;
+            border: 1px solid #d0d7de;
+            border-radius: 6px;
+            padding: 6px 12px;
+            font-size: 13px;
+            color: #1f2328;
+            cursor: pointer;
+        }
+        .guides-clear-btn:hover {
+            background: #eaeef2;
+        }
+        .guides-clear-btn.visible { display: inline-block; }
         /* Full-screen mode. The expanded card pins to the viewport at
            z-index 100 (above the sidebar at 10), and body scroll is
            locked while it's active. Esc dismisses; the in-card button
@@ -254,15 +377,20 @@
         body.with-sidebar .chart-card.card-fullscreen {
             left: 240px;
         }
-        /* Chart canvas fills the area below the header in full-screen.
-           h2 is ~38 px tall (10 padding × 2 + ~18 line-height); the
-           per-card zoom bar (~46 px) is subtracted too when present. */
+        /* Chart-body height in fullscreen: viewport minus h2 (~38 px)
+           minus zoom-bar's reserved slot (46 px). Always subtracted,
+           even on charts without a zoom-bar, to avoid relying on the
+           sibling-conditional :has(+ .chart-zoom-bar) rule that
+           preceded this — that rule's match status didn't always
+           re-evaluate in the same style recalc as the .card-fullscreen
+           class toggle, leaving chart-body at its 360 px grid-view
+           height inside a card stretched to the viewport so Chart.js
+           painted onto a small canvas hidden up at the top of an
+           otherwise empty card. A flat 46 px cost on non-time-axis
+           charts (a tiny unused strip at the bottom) is the price for
+           making fullscreen render reliably. */
         .chart-card.card-fullscreen .chart-body {
-            height: calc(100vh - 40px);
-        }
-        .chart-card.card-fullscreen .chart-zoom-bar + .chart-body,
-        .chart-card.card-fullscreen .chart-body:has(+ .chart-zoom-bar) {
-            height: calc(100vh - 40px - 46px);
+            height: calc(100vh - 84px);
         }
         /* ---------------- Per-card zoom slider (time-axis charts) ---------------- */
         .chart-zoom-bar {
@@ -544,7 +672,13 @@
     <div class="upload-bar">
         <input type="file" id="file" accept=".log,.txt,.gz,*">
         <button id="go" type="button">Analyze</button>
+        <button id="guides-clear" class="guides-clear-btn" type="button">Clear guides</button>
     </div>
+
+    <!-- Shared popup repositioned per hover. Cheaper than one
+         absolutely-positioned popup per guide; only one guide can be
+         hovered at a time anyway. -->
+    <div id="guide-popup" class="guide-popup" role="tooltip" aria-hidden="true"></div>
     <div class="status" id="status">Pick a GC log and hit Analyze.</div>
 
     <section class="page-section hidden" id="section-summary">
@@ -864,6 +998,23 @@
     }
 
     /**
+     * Isolated render dispatch — invokes a renderer with arbitrary args
+     * and converts any thrown error into a console warning instead of
+     * letting it cascade and abort the whole analyze() pipeline. One
+     * card failing to render must not prevent the collector tag, the
+     * sidebar, or any other card from updating. Use this for every
+     * per-card render call; the few non-card calls (analytics, sidebar
+     * build) stay inline because they don't fan-out to multiple cards.
+     */
+    function safeRender(renderer, canvasId, view) {
+        try {
+            renderer(canvasId, view);
+        } catch (e) {
+            console.warn(`render failed for ${canvasId}:`, e);
+        }
+    }
+
+    /**
      * Show or hide the chart-card containing the element with the given id.
      * Looks up the nearest .chart-card ancestor — works for canvases (chart
      * views) and summary-body divs (summary-style cards) alike.
@@ -1120,6 +1271,14 @@
             zoomBars.delete(canvasId);
             if (existingBar) existingBar.remove();
         }
+        // Splice this chart into the guide-line registry: stash axis
+        // metadata, rebuild its annotation list from the central
+        // `guides[]`, and place any source-chart inline label tags.
+        attachChartGuideMeta(canvasId, view);
+        // First-time chart creation needs a click listener; subsequent
+        // re-renders use the same canvas DOM element so the listener
+        // persists. The wireCanvasClickHandlers helper is idempotent.
+        wireCanvasClickHandlers();
     }
 
     // ---------- Per-card full-screen toggle ----------
@@ -1190,11 +1349,703 @@
         const canvas = card.querySelector('canvas');
         if (!canvas) return;
         const chart = charts[canvas.id];
-        if (chart) {
-            // Defer so Chart.js sees the new parent dimensions.
-            requestAnimationFrame(() => chart.resize());
+        if (!chart) return;
+        // Double rAF: the fullscreen toggle changes three things at
+        // once — the chart-card's positioning, the chart-zoom-bar's
+        // display state, and the chart-body's height-calc rules. The
+        // first rAF lets the style recalc complete; the second lets
+        // the resulting reflow settle before Chart.js measures.
+        // <p>
+        // Important: never pass explicit width/height to chart.resize().
+        // If the parent reports 0 during a transient state, an explicit
+        // resize(0, 0) makes Chart.js's retinaScale return false and
+        // short-circuit out of render(), leaving the chart's internal
+        // dimensions at 0 — every subsequent paint draws onto a 0x0
+        // buffer, and the chart appears empty in both fullscreen and
+        // grid view until a fresh analyze rebuilds it. Calling resize()
+        // with no args delegates detection to Chart.js, which is
+        // tolerant of transient zero readings via its own platform
+        // helpers.
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+            chart.resize();
+            // Refresh the per-card guide overlays alongside the
+            // resize: a fullscreen flip means lines and labels need to
+            // turn on (entering) or get wiped (exiting), and the
+            // chart's redraw will fire the line-drawing plugin
+            // automatically — we just need to handle the label tags.
+            placeLabelTagsForChart(canvas.id);
+        }));
+    }
+
+    // ===================== Cross-chart guide lines =====================
+    //
+    // Vertical and horizontal reference lines anchored to a data point.
+    // Each guide carries the unit of the axis it was dropped on and
+    // re-renders on every chart whose corresponding axis matches that
+    // unit, surviving zoom / re-layout because chartjs-plugin-annotation
+    // anchors annotations in data coordinates. State is session-only:
+    // a fresh analyze wipes the guide list and the next render starts
+    // clean.
+
+    const SVG_VRULE = '<svg width="14" height="14" viewBox="0 0 24 24"'
+            + ' fill="none" stroke="currentColor" stroke-width="2"'
+            + ' stroke-linecap="round"><line x1="12" y1="3" x2="12" y2="21"/></svg>';
+    const SVG_HRULE = '<svg width="14" height="14" viewBox="0 0 24 24"'
+            + ' fill="none" stroke="currentColor" stroke-width="2"'
+            + ' stroke-linecap="round"><line x1="3" y1="12" x2="21" y2="12"/></svg>';
+
+    // Cycling palette so adjacent guides are visually distinct. Picked
+    // for contrast against both the white card and the data-point hues
+    // already used by the chart palettes.
+    const GUIDE_COLORS = [
+        '#d63384', '#0d6efd', '#fd7e14', '#198754',
+        '#6f42c1', '#dc3545', '#20c997', '#0dcaf0'
+    ];
+
+    // The guide list lives at the module level — single source of truth
+    // that every renderer consults at draw time.
+    const guides = [];
+    let nextGuideId = 1;
+    let armed = null; // { orientation: 'vertical' | 'horizontal' } when waiting for a click
+
+    /**
+     * Format a numeric guide value with its unit for the default label
+     * and the hover popup. Time gets the seconds suffix; ms / MB / %
+     * print with one decimal; everything else falls through with two.
+     */
+    function formatGuideValue(value, unit, xAxisLabel) {
+        if (xAxisLabel === 'time (s)' && unit === undefined) {
+            return `t=${value.toFixed(2)}s`;
+        }
+        if (unit === 'time (s)' || unit === 's') {
+            return `${value.toFixed(2)} s`;
+        }
+        if (unit === 'ms')  return `${value.toFixed(1)} ms`;
+        if (unit === 'MB')  return `${value.toFixed(1)} MB`;
+        if (unit === '%')   return `${value.toFixed(1)} %`;
+        if (unit === '')    return `${value.toFixed(2)}`;
+        return `${value.toFixed(2)} ${unit || ''}`.trim();
+    }
+
+    /**
+     * Stash a small metadata sidecar on the chart instance so the
+     * guide logic can look up the chart's axis labels and units
+     * without re-reading the view envelope. Called from postRenderHook
+     * once per render.
+     */
+    /**
+     * Cache axis metadata on the chart instance so the guide plugin
+     * and the click hit-tester can read it without re-walking the
+     * view JSON each draw. Called once per render via postRenderHook.
+     * <p>
+     * Crucially: does NOT touch chart.options. Mutating
+     * chart.options.plugins after the chart has been constructed
+     * makes Chart.js v4's option resolver re-walk and re-introspect
+     * the plugin sub-trees on the next draw, which is exactly where
+     * the previous chartjs-plugin-annotation v3.0.1 integration blew
+     * up with "Recursion detected: _scriptable->_scriptable" — its
+     * registered defaults exposed option keys the resolver tried to
+     * iterate as strings (calling .startsWith() on them) but some
+     * were non-strings, and the recovery path looped. The hand-rolled
+     * plugin below reads guides[] straight off the module-level
+     * variable on each afterDatasetsDraw call, so no per-chart option
+     * mutation is ever needed.
+     */
+    function attachChartGuideMeta(canvasId, view) {
+        const chart = charts[canvasId];
+        if (!chart) return;
+        const data = view?.aggregation?.data;
+        chart.$guideMeta = data ? {
+            canvasId,
+            xAxisLabel: data.xAxisLabel,
+            yAxisLabel: data.yAxisLabel,
+            yUnit:      data.yUnit
+        } : null;
+        // Slow path: only when we already have guides to draw. Refresh
+        // the affected chart on the next frame so its overlay reflects
+        // the existing guides immediately after a re-render.
+        if (guides.length === 0) return;
+        requestAnimationFrame(() => {
+            const c = charts[canvasId];
+            if (!c) return;
+            c.draw();
+            placeLabelTagsForChart(canvasId);
+        });
+    }
+
+    /**
+     * Is this chart's card currently the fullscreen one? Guide lines
+     * and labels only render when the card is expanded; in the grid
+     * view the charts are too small for annotation overlay to be
+     * useful and the extra ink just clutters the page. This helper
+     * is read by the plugin, the label placer, and the canvas event
+     * handlers so all four interaction paths agree on the gate.
+     */
+    function isCardFullscreen(canvasOrId) {
+        const id = typeof canvasOrId === 'string' ? canvasOrId : canvasOrId?.id;
+        const card = id ? document.getElementById(id)?.closest('.chart-card') : null;
+        return !!card && card.classList.contains('card-fullscreen');
+    }
+
+    /**
+     * Custom Chart.js plugin that draws every applicable guide line on
+     * top of the dataset. Pure 2D-canvas drawing — no scriptable
+     * options, no Proxy-wrapped defaults, no option-resolver
+     * interaction. Reads the module-level guides[] on every draw, so
+     * adding / removing a guide is just a matter of mutating the array
+     * and calling chart.draw() (or letting the next natural draw cycle
+     * pick it up). Lines only render on the fullscreen card.
+     */
+    const GuideLinesPlugin = {
+        id: 'gcseeGuideLines',
+        afterDatasetsDraw(chart) {
+            if (!isCardFullscreen(chart.canvas)) return;
+            const meta = chart.$guideMeta;
+            if (!meta || guides.length === 0) return;
+            const ctx = chart.ctx;
+            const area = chart.chartArea;
+            if (!area) return;
+            ctx.save();
+            ctx.setLineDash([6, 4]);
+            ctx.lineWidth = 1.5;
+            for (const g of guides) {
+                if (g.orientation === 'vertical' && g.unit === meta.xAxisLabel) {
+                    const x = chart.scales.x.getPixelForValue(g.value);
+                    if (!isFinite(x) || x < area.left || x > area.right) continue;
+                    ctx.strokeStyle = g.color;
+                    ctx.beginPath();
+                    ctx.moveTo(x, area.top);
+                    ctx.lineTo(x, area.bottom);
+                    ctx.stroke();
+                } else if (g.orientation === 'horizontal' && g.unit === meta.yUnit) {
+                    const y = chart.scales.y.getPixelForValue(g.value);
+                    if (!isFinite(y) || y < area.top || y > area.bottom) continue;
+                    ctx.strokeStyle = g.color;
+                    ctx.beginPath();
+                    ctx.moveTo(area.left, y);
+                    ctx.lineTo(area.right, y);
+                    ctx.stroke();
+                }
+            }
+            ctx.restore();
+        }
+    };
+    // Idempotent registration — same belt-and-braces as before.
+    if (typeof Chart !== 'undefined' && !window.__gcseeGuidePluginRegistered) {
+        Chart.register(GuideLinesPlugin);
+        window.__gcseeGuidePluginRegistered = true;
+    }
+
+    /**
+     * Hit-test a click at (px, py) on a chart canvas against the
+     * applicable guides for that chart. Returns the matching guide if
+     * the click landed within HIT_TOLERANCE pixels of one of its
+     * lines, or null otherwise. Used by onCanvasClick to delete a
+     * guide when the user clicks it without arming a new drop.
+     */
+    function hitTestGuideOnChart(chart, px, py) {
+        const meta = chart.$guideMeta;
+        if (!meta) return null;
+        const area = chart.chartArea;
+        if (!area) return null;
+        const HIT_TOLERANCE = 5;
+        for (const g of guides) {
+            if (g.orientation === 'vertical' && g.unit === meta.xAxisLabel) {
+                const x = chart.scales.x.getPixelForValue(g.value);
+                if (!isFinite(x)) continue;
+                if (Math.abs(px - x) <= HIT_TOLERANCE
+                        && py >= area.top && py <= area.bottom) {
+                    return g;
+                }
+            } else if (g.orientation === 'horizontal' && g.unit === meta.yUnit) {
+                const y = chart.scales.y.getPixelForValue(g.value);
+                if (!isFinite(y)) continue;
+                if (Math.abs(py - y) <= HIT_TOLERANCE
+                        && px >= area.left && px <= area.right) {
+                    return g;
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Tell every chart to redraw its overlay. With the plugin reading
+     * guides[] on each draw, there's no per-chart state to rebuild —
+     * just trigger a draw. Deferred to the next frame so concurrent
+     * mutations (drop + delete in quick succession) collapse to one
+     * paint.
+     */
+    function refreshAllChartsForGuides() {
+        updateClearGuidesButton();
+        requestAnimationFrame(() => {
+            for (const id in charts) {
+                const c = charts[id];
+                if (!c) continue;
+                c.draw();
+                placeLabelTagsForChart(id);
+            }
+        });
+    }
+
+    function updateClearGuidesButton() {
+        const btn = document.getElementById('guides-clear');
+        if (!btn) return;
+        btn.classList.toggle('visible', guides.length > 0);
+    }
+
+    // ---------- Arm / disarm / drop ----------
+
+    function armGuide(orientation) {
+        if (armed && armed.orientation === orientation) {
+            disarmGuide();
+            return;
+        }
+        armed = { orientation };
+        document.body.classList.add('guides-armed');
+        document.querySelectorAll('.chart-guide-btn').forEach(b => {
+            b.classList.toggle('armed',
+                    b.dataset.orient === orientation);
+        });
+    }
+
+    function disarmGuide() {
+        armed = null;
+        document.body.classList.remove('guides-armed');
+        document.querySelectorAll('.chart-guide-btn.armed')
+                .forEach(b => b.classList.remove('armed'));
+    }
+
+    /**
+     * Click handler shared by every chart canvas. Two responsibilities:
+     * <ul>
+     *   <li>When armed (user just clicked vrule / hrule), drop a new
+     *       guide at the nearest data point.</li>
+     *   <li>When not armed, hit-test for an existing guide line under
+     *       the cursor and delete it on direct hit. No-op if the click
+     *       missed every guide — Chart.js's own click / hover plumbing
+     *       handles its tooltips.</li>
+     * </ul>
+     */
+    function onCanvasClick(canvas, ev) {
+        const chart = charts[canvas.id];
+        if (!chart) return;
+        const rect = canvas.getBoundingClientRect();
+        const px = ev.clientX - rect.left;
+        const py = ev.clientY - rect.top;
+
+        if (armed) {
+            const snap = findNearestPoint(chart, px, py);
+            if (!snap) {
+                const xVal = chart.scales.x.getValueForPixel(px);
+                const yVal = chart.scales.y.getValueForPixel(py);
+                createGuide(armed.orientation, canvas.id, xVal, yVal, null, null);
+            } else {
+                createGuide(armed.orientation, canvas.id,
+                            snap.xValue, snap.yValue,
+                            snap.datasetLabel, snap.datasetIndex);
+            }
+            disarmGuide();
+            return;
+        }
+
+        // Not armed: clicking a guide line deletes it. Only active on
+        // a fullscreen card — lines aren't drawn in grid view, so we
+        // shouldn't pick up phantom hits there either.
+        if (!isCardFullscreen(canvas)) return;
+        const hit = hitTestGuideOnChart(chart, px, py);
+        if (hit) deleteGuide(hit.id);
+    }
+
+    /**
+     * Pointer-move handler attached alongside the click handler. Shows
+     * the guide popup when the cursor is over a guide line, hides it
+     * otherwise. Cheap — one hit-test per move event. Same fullscreen
+     * gate as the click hit-tester so the popup doesn't appear when
+     * the line itself isn't drawn.
+     */
+    function onCanvasMouseMove(canvas, ev) {
+        if (armed) return; // crosshair cursor is the cue while armed
+        if (!isCardFullscreen(canvas)) { hideGuidePopup(); return; }
+        const chart = charts[canvas.id];
+        if (!chart) return;
+        const rect = canvas.getBoundingClientRect();
+        const px = ev.clientX - rect.left;
+        const py = ev.clientY - rect.top;
+        const hit = hitTestGuideOnChart(chart, px, py);
+        if (hit) showGuidePopup(hit, ev);
+        else     hideGuidePopup();
+    }
+
+    /**
+     * Nearest-point search across every dataset of a chart. Uses pixel
+     * distance so the snap matches the visual point the user pointed
+     * at; the value coords come straight off the dataset payload so
+     * placement is exact (no inverse-scale rounding).
+     */
+    function findNearestPoint(chart, px, py) {
+        let best = null;
+        let bestDistSq = Infinity;
+        for (let di = 0; di < chart.data.datasets.length; di++) {
+            const meta = chart.getDatasetMeta(di);
+            if (meta.hidden) continue;
+            const pts = meta.data || [];
+            const ds = chart.data.datasets[di];
+            for (let i = 0; i < pts.length; i++) {
+                const el = pts[i];
+                if (!el || !isFinite(el.x) || !isFinite(el.y)) continue;
+                const dx = el.x - px;
+                const dy = el.y - py;
+                const d2 = dx * dx + dy * dy;
+                if (d2 < bestDistSq) {
+                    bestDistSq = d2;
+                    // Parsed value pair lives on the parsed cache;
+                    // for `parsing: false` datasets the raw point is
+                    // accessible at ds.data[i].
+                    const raw = ds.data[i];
+                    best = {
+                        xValue: raw && typeof raw.x === 'number' ? raw.x
+                                : chart.getDatasetMeta(di).iScale.getValueForPixel(el.x),
+                        yValue: raw && typeof raw.y === 'number' ? raw.y
+                                : chart.getDatasetMeta(di).vScale.getValueForPixel(el.y),
+                        datasetLabel: ds.label,
+                        datasetIndex: di
+                    };
+                }
+            }
+        }
+        return best;
+    }
+
+    /**
+     * Mint a new guide and seed its label from the formatted value.
+     * The originating chart is stashed so the inline label tag knows
+     * where to render and the popup can name the source.
+     */
+    function createGuide(orientation, sourceCanvasId, xValue, yValue, seriesLabel, datasetIndex) {
+        const chart = charts[sourceCanvasId];
+        if (!chart || !chart.$guideMeta) return;
+        const meta = chart.$guideMeta;
+        const id = `guide-${nextGuideId++}`;
+        const color = GUIDE_COLORS[guides.length % GUIDE_COLORS.length];
+
+        const value   = (orientation === 'vertical') ? xValue : yValue;
+        const unit    = (orientation === 'vertical') ? meta.xAxisLabel : meta.yUnit;
+        const label   = formatGuideValue(value, unit);
+
+        guides.push({
+            id,
+            orientation,
+            value,
+            unit,
+            label,
+            color,
+            sourceCanvasId,
+            source: {
+                xValue, yValue,
+                xAxisLabel: meta.xAxisLabel,
+                yUnit: meta.yUnit,
+                yAxisLabel: meta.yAxisLabel,
+                seriesLabel,
+                datasetIndex
+            }
+        });
+        refreshAllChartsForGuides();
+    }
+
+    function deleteGuide(id) {
+        const idx = guides.findIndex(g => g.id === id);
+        if (idx < 0) return;
+        // Remove any inline label tag living on the source chart.
+        const tag = document.querySelector(`.guide-label-tag[data-guide-id="${id}"]`);
+        if (tag) tag.remove();
+        guides.splice(idx, 1);
+        hideGuidePopup();
+        refreshAllChartsForGuides();
+    }
+
+    function clearAllGuides() {
+        if (guides.length === 0) return;
+        guides.length = 0;
+        document.querySelectorAll('.guide-label-tag').forEach(t => t.remove());
+        hideGuidePopup();
+        disarmGuide();
+        refreshAllChartsForGuides();
+    }
+
+    /** Called on every fresh upload — same lifecycle as the zoom state. */
+    function resetGuides() {
+        clearAllGuides();
+        nextGuideId = 1;
+    }
+
+    // ---------- Per-card guide buttons ----------
+
+    function setupChartGuideButtons() {
+        document.querySelectorAll('.chart-card').forEach(card => {
+            if (card.querySelector('.chart-guide-btn')) return;
+            const vbtn = makeGuideBtn('vrule',
+                    'Drop vertical reference line', SVG_VRULE, 'vertical');
+            const hbtn = makeGuideBtn('hrule',
+                    'Drop horizontal reference line', SVG_HRULE, 'horizontal');
+            card.appendChild(vbtn);
+            card.appendChild(hbtn);
+        });
+    }
+
+    function makeGuideBtn(cls, title, svg, orientation) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'chart-guide-btn ' + cls;
+        btn.innerHTML = svg;
+        btn.title = title;
+        btn.setAttribute('aria-label', title);
+        btn.dataset.orient = orientation;
+        btn.addEventListener('click', e => {
+            e.stopPropagation();
+            armGuide(orientation);
+        });
+        return btn;
+    }
+
+    /**
+     * Attach a single click listener to every chart canvas. Using
+     * capture so we run before Chart.js's own click handlers — keeps
+     * drop placement crisp even when datasets have their own onClick.
+     * Re-runnable: the dataset.guideClickWired marker guarantees one
+     * listener per canvas regardless of how many times this fires.
+     */
+    function wireCanvasClickHandlers() {
+        document.querySelectorAll('.chart-card canvas').forEach(canvas => {
+            if (canvas.dataset.guideClickWired === '1') return;
+            canvas.dataset.guideClickWired = '1';
+            canvas.addEventListener('click',     ev => onCanvasClick(canvas, ev));
+            canvas.addEventListener('mousemove', ev => onCanvasMouseMove(canvas, ev));
+            canvas.addEventListener('mouseleave', () => hideGuidePopup());
+        });
+        document.addEventListener('keydown', e => {
+            if (e.key === 'Escape' && armed) disarmGuide();
+        }, { once: false });
+    }
+
+    // ---------- Hover popup ----------
+
+    function showGuidePopup(g, nativeEvent) {
+        const popup = document.getElementById('guide-popup');
+        if (!popup) return;
+        const sx = g.source.xValue, sy = g.source.yValue;
+        const xLabel = g.source.xAxisLabel || 'x';
+        const yLabel = g.source.yAxisLabel || 'y';
+        const xText  = formatGuideValue(sx, g.source.xAxisLabel);
+        const yText  = formatGuideValue(sy, g.source.yUnit);
+        const series = g.source.seriesLabel
+                ? `<div class="guide-popup-meta">Series: ${escapeHtml(g.source.seriesLabel)}</div>`
+                : '';
+        popup.innerHTML =
+                `<div class="guide-popup-label" style="color:${g.color}">${escapeHtml(g.label)}</div>` +
+                `<div class="guide-popup-meta">${escapeHtml(xLabel)}: ${xText}</div>` +
+                `<div class="guide-popup-meta">${escapeHtml(yLabel)}: ${yText}</div>` +
+                series +
+                `<div class="guide-popup-meta">Click line to delete</div>`;
+        popup.style.display = 'block';
+        positionGuidePopup(nativeEvent);
+    }
+
+    function positionGuidePopup(ev) {
+        const popup = document.getElementById('guide-popup');
+        if (!popup) return;
+        const x = (ev && ev.clientX != null) ? ev.clientX : 16;
+        const y = (ev && ev.clientY != null) ? ev.clientY : 16;
+        popup.style.left = (x + 14) + 'px';
+        popup.style.top  = (y + 14) + 'px';
+        // Clamp to viewport so a near-edge hover doesn't push it off-screen.
+        const r = popup.getBoundingClientRect();
+        if (r.right > window.innerWidth - 8) {
+            popup.style.left = (window.innerWidth - r.width - 8) + 'px';
+        }
+        if (r.bottom > window.innerHeight - 8) {
+            popup.style.top  = (window.innerHeight - r.height - 8) + 'px';
         }
     }
+
+    function hideGuidePopup() {
+        const popup = document.getElementById('guide-popup');
+        if (popup) popup.style.display = 'none';
+    }
+
+    function escapeHtml(s) {
+        return String(s).replace(/[&<>"']/g, c => ({
+            '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+        }[c]));
+    }
+
+    // ---------- Inline editable label on source chart ----------
+    //
+    // The plugin draws guide lines on every chart whose axis unit
+    // matches the guide. Labels follow the same rule — one positioned
+    // span per (chart, guide) pair, anchored to the guide's value on
+    // each chart it appears on. The tag flips into contenteditable on
+    // click; Enter commits, Esc reverts. Edits propagate to every
+    // mirror tag for the same guide so the user sees a consistent
+    // label everywhere the line shows.
+
+    /**
+     * Predicate that mirrors GuideLinesPlugin's drawing rule: does
+     * this guide render on a chart with the given axis metadata?
+     */
+    function guideAppliesTo(g, meta) {
+        if (!meta) return false;
+        return (g.orientation === 'vertical'  && g.unit === meta.xAxisLabel)
+            || (g.orientation === 'horizontal' && g.unit === meta.yUnit);
+    }
+
+    function placeLabelTagsForChart(canvasId) {
+        const chart = charts[canvasId];
+        if (!chart) return;
+        const card = document.getElementById(canvasId)?.closest('.chart-card');
+        if (!card) return;
+        // Labels only show on a fullscreen card. In grid view, wipe
+        // any tags that exist (e.g. left over from a card that was
+        // just collapsed) and bail out — the gate matches the line-
+        // drawing plugin so the two stay in sync.
+        if (!isCardFullscreen(canvasId)) {
+            card.querySelectorAll('.guide-label-tag').forEach(t => t.remove());
+            return;
+        }
+        const meta = chart.$guideMeta;
+        // Remove any tags whose backing guide no longer exists OR
+        // whose backing guide no longer applies to this chart (e.g. a
+        // guide was placed on a unit this chart doesn't have).
+        card.querySelectorAll('.guide-label-tag').forEach(tag => {
+            const g = guides.find(g => g.id === tag.dataset.guideId);
+            if (!g || !guideAppliesTo(g, meta)) tag.remove();
+        });
+        // Place / update tags for every guide that applies to this
+        // chart — not just the one it was dropped on.
+        for (const g of guides) {
+            if (!guideAppliesTo(g, meta)) continue;
+            const tag = card.querySelector(`.guide-label-tag[data-guide-id="${g.id}"]`)
+                    || createLabelTag(g, card);
+            positionLabelTag(tag, chart, g);
+        }
+    }
+
+    function createLabelTag(g, card) {
+        const tag = document.createElement('span');
+        tag.className = 'guide-label-tag';
+        tag.dataset.guideId = g.id;
+        tag.style.setProperty('--guide-color', g.color);
+        tag.textContent = g.label;
+        tag.title = 'Click to edit, Enter to commit, Esc to cancel';
+        tag.addEventListener('click', e => {
+            e.stopPropagation();
+            beginEditLabel(tag, g);
+        });
+        // Card must be position:relative for absolute children — it
+        // already is via the existing .chart-card rule, but we rely on
+        // the canvas being inside .chart-body for offset math.
+        card.appendChild(tag);
+        return tag;
+    }
+
+    /**
+     * Place the label at the guide's value on its source chart. For a
+     * vertical line we sit it near the top of the plot area at the
+     * line's x; for horizontal, near the left at the line's y.
+     */
+    function positionLabelTag(tag, chart, g) {
+        const area = chart.chartArea;
+        const canvas = chart.canvas;
+        const card = canvas.closest('.chart-card');
+        if (!area || !canvas || !card) return;
+        const canvasRect = canvas.getBoundingClientRect();
+        const cardRect   = card.getBoundingClientRect();
+        // Offset the canvas's plot-area origin into card-relative coords.
+        const offX = canvasRect.left - cardRect.left;
+        const offY = canvasRect.top  - cardRect.top;
+        if (g.orientation === 'vertical') {
+            const px = chart.scales.x.getPixelForValue(g.value);
+            if (!isFinite(px) || px < area.left || px > area.right) {
+                tag.style.display = 'none';
+                return;
+            }
+            tag.style.display = '';
+            tag.style.left = (offX + px) + 'px';
+            tag.style.top  = (offY + area.top + 14) + 'px';
+        } else {
+            const py = chart.scales.y.getPixelForValue(g.value);
+            if (!isFinite(py) || py < area.top || py > area.bottom) {
+                tag.style.display = 'none';
+                return;
+            }
+            tag.style.display = '';
+            tag.style.left = (offX + area.left + 38) + 'px';
+            tag.style.top  = (offY + py) + 'px';
+        }
+    }
+
+    /**
+     * Walk every chart card and update the text content of every tag
+     * that mirrors the given guide. Called after a label edit commits
+     * (or reverts) so the new label shows on every chart where the
+     * guide is rendered — not just the one the edit happened on.
+     */
+    function syncLabelTagsForGuide(g) {
+        document.querySelectorAll(
+                `.guide-label-tag[data-guide-id="${g.id}"]`).forEach(t => {
+            t.textContent = g.label;
+        });
+    }
+
+    function beginEditLabel(tag, g) {
+        tag.classList.add('editing');
+        const original = g.label;
+        tag.contentEditable = 'true';
+        tag.focus();
+        // Select-all so typing replaces the old label.
+        const sel = window.getSelection();
+        const range = document.createRange();
+        range.selectNodeContents(tag);
+        sel.removeAllRanges();
+        sel.addRange(range);
+
+        const commit = () => {
+            const val = tag.textContent.trim();
+            g.label = val || original; // empty rejects, restores previous
+            tag.textContent = g.label;
+            tag.classList.remove('editing');
+            tag.contentEditable = 'false';
+            tag.removeEventListener('keydown', onKey);
+            tag.removeEventListener('blur', commit);
+            // Propagate to every mirror tag for the same guide.
+            syncLabelTagsForGuide(g);
+        };
+        const onKey = e => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                commit();
+            } else if (e.key === 'Escape') {
+                tag.textContent = original;
+                g.label = original;
+                tag.contentEditable = 'false';
+                tag.classList.remove('editing');
+                tag.removeEventListener('keydown', onKey);
+                tag.removeEventListener('blur', commit);
+                syncLabelTagsForGuide(g);
+            }
+        };
+        tag.addEventListener('keydown', onKey);
+        tag.addEventListener('blur', commit);
+    }
+
+    // Reposition the label tags whenever the page reflows — easier than
+    // wiring per-chart resize observers, and the cost is one DOM read /
+    // write per visible guide.
+    window.addEventListener('resize', () => {
+        for (const id in charts) placeLabelTagsForChart(id);
+    });
+
+    // ===================== /Cross-chart guide lines ====================
 
     /**
      * Drop any collector-incompatibility marks from a previous log so
@@ -2133,6 +2984,7 @@
         resetZoomState();
         exitCardFullscreen();
         clearCollectorFilter();
+        resetGuides();
         try {
             const { id } = await upload(file);
             setStatus(`Parsed. Session ${id}. Loading views…`);
@@ -2203,35 +3055,45 @@
                 fetchView(id, 'zgc-system-load'),
                 fetchView(id, 'analytics')
             ]);
-            render('heap-occupancy',                heap);
-            render('heap-occupancy-before',         heapBefore);
-            render('heap-occupancy-before-percent', heapBeforePct);
-            render('heap-occupancy-after-percent',  heapAfterPct);
-            render('tenured-occupancy',         tenuredAfter);
-            render('tenured-occupancy-before',  tenuredBefore);
-            render('metaspace-occupancy', meta);
-            render('pause-time',          pause);
-            render('percent-time-in-gc',  pctTimeInGc);
-            renderXYScatter('mmu',                       mmu);
-            renderXYScatter('concurrent-phase-duration', concurrentPhase);
-            renderXYScatter('cpu-breakouts',             cpuBreakouts);
-            render('allocation-rate',     alloc);
-            render('allocation-per-collection', allocPerColl);
-            render('recovered',           recovered);
-            renderStackedArea('g1-phases',                g1Phases);
-            renderStackedArea('g1-phase-percent',         g1PhasePct);
-            renderXYScatter('g1-pre-collection',          g1Pre);
-            renderXYScatter('g1-pre-collection-percent',  g1PrePct);
-            renderXYScatter('g1-collection',              g1Coll);
-            renderXYScatter('g1-collection-percent',      g1CollPct);
-            renderXYScatter('g1-post-collection',         g1Post);
-            renderXYScatter('g1-post-collection-percent', g1PostPct);
-            renderXYScatter('g1-other-collection',        g1Other);
-            renderXYScatter('g1-other-collection-percent', g1OtherPct);
-            renderStackedScatter('g1-regions-before',         g1RegBefore);
-            renderStackedScatter('g1-regions-after',          g1RegAfter);
-            renderStackedScatter('g1-regions-before-percent', g1RegBeforePct);
-            renderStackedScatter('g1-regions-after-percent',  g1RegAfterPct);
+            // Apply the collector tag immediately — the summary view is
+            // already in hand and the sidebar reads its collector
+            // straight off it. Doing this before the per-card render
+            // loop guarantees the tag is correct even if a later
+            // renderer hits an exception we haven't caught yet. The
+            // full applyCollectorFilter (including subsection / card
+            // hiding) still runs after the renders so empty cards have
+            // settled their visibility first.
+            updateCollectorTag(summary?.aggregation?.data?.collector);
+            applyCollectorHeadings(summary?.aggregation?.data?.collector);
+            safeRender(render, 'heap-occupancy',                heap);
+            safeRender(render, 'heap-occupancy-before',         heapBefore);
+            safeRender(render, 'heap-occupancy-before-percent', heapBeforePct);
+            safeRender(render, 'heap-occupancy-after-percent',  heapAfterPct);
+            safeRender(render, 'tenured-occupancy',         tenuredAfter);
+            safeRender(render, 'tenured-occupancy-before',  tenuredBefore);
+            safeRender(render, 'metaspace-occupancy', meta);
+            safeRender(render, 'pause-time',          pause);
+            safeRender(render, 'percent-time-in-gc',  pctTimeInGc);
+            safeRender(renderXYScatter, 'mmu',                       mmu);
+            safeRender(renderXYScatter, 'concurrent-phase-duration', concurrentPhase);
+            safeRender(renderXYScatter, 'cpu-breakouts',             cpuBreakouts);
+            safeRender(render, 'allocation-rate',     alloc);
+            safeRender(render, 'allocation-per-collection', allocPerColl);
+            safeRender(render, 'recovered',           recovered);
+            safeRender(renderStackedArea, 'g1-phases',                g1Phases);
+            safeRender(renderStackedArea, 'g1-phase-percent',         g1PhasePct);
+            safeRender(renderXYScatter, 'g1-pre-collection',          g1Pre);
+            safeRender(renderXYScatter, 'g1-pre-collection-percent',  g1PrePct);
+            safeRender(renderXYScatter, 'g1-collection',              g1Coll);
+            safeRender(renderXYScatter, 'g1-collection-percent',      g1CollPct);
+            safeRender(renderXYScatter, 'g1-post-collection',         g1Post);
+            safeRender(renderXYScatter, 'g1-post-collection-percent', g1PostPct);
+            safeRender(renderXYScatter, 'g1-other-collection',        g1Other);
+            safeRender(renderXYScatter, 'g1-other-collection-percent', g1OtherPct);
+            safeRender(renderStackedScatter, 'g1-regions-before',         g1RegBefore);
+            safeRender(renderStackedScatter, 'g1-regions-after',          g1RegAfter);
+            safeRender(renderStackedScatter, 'g1-regions-before-percent', g1RegBeforePct);
+            safeRender(renderStackedScatter, 'g1-regions-after-percent',  g1RegAfterPct);
             // On Parallel and Serial the tenuring-age accounting can't
             // detect premature promotion, so we project the summary
             // onto the fields that still make sense (max threshold,
@@ -2239,30 +3101,30 @@
             // breakdown table). filterTenuringSummaryForCollector is
             // a pass-through on G1.
             const collectorForFilter = summary?.aggregation?.data?.collector;
-            renderSummary('tenuring-summary',
+            safeRender(renderSummary, 'tenuring-summary',
                     filterTenuringSummaryForCollector(tenuringSummary, collectorForFilter));
-            renderXYScatter('tenuring-volume',    tenuringVolume);
-            renderXYScatter('tenuring-threshold', tenuringThreshold);
-            renderXYScatter('tenuring-over-time', tenuringOverTime);
-            renderCategoryStackedBar('gc-cause',  gcCause);
-            renderXYScatter('reference-count',          refCount);
-            renderXYScatter('reference-time',           refTime);
-            renderXYScatter('safepoint-duration',       safepointDur);
-            renderCategoryStackedBar('safepoint-cause', safepointCause);
+            safeRender(renderXYScatter, 'tenuring-volume',    tenuringVolume);
+            safeRender(renderXYScatter, 'tenuring-threshold', tenuringThreshold);
+            safeRender(renderXYScatter, 'tenuring-over-time', tenuringOverTime);
+            safeRender(renderCategoryStackedBar, 'gc-cause',  gcCause);
+            safeRender(renderXYScatter, 'reference-count',          refCount);
+            safeRender(renderXYScatter, 'reference-time',           refTime);
+            safeRender(renderXYScatter, 'safepoint-duration',       safepointDur);
+            safeRender(renderCategoryStackedBar, 'safepoint-cause', safepointCause);
             // ZGC chart batch — scatter renderer for the GCCategory-keyed
             // live charts (same shape as heap-occupancy), XY renderer for
             // the named-series charts (pause sub-types, cycle types, load
             // averages, concurrent-phase durations and percent).
-            render('zgc-live-at-relocate-start',      zgcLiveStart);
-            render('zgc-live-at-relocate-end',        zgcLiveEnd);
-            renderXYScatter('zgc-concurrent-phase-durations', zgcConcurrentPhases);
-            renderXYScatter('zgc-cycle-durations',            zgcCycleDur);
-            renderXYScatter('zgc-cycle-time-percent',         zgcCyclePct);
-            renderXYScatter('zgc-pause-time',                 zgcPause);
-            renderXYScatter('zgc-cycle-durations-and-intervals', zgcCycleDurInt);
-            renderXYScatter('zgc-system-load',                zgcSysLoad);
-            renderSummary('summary', summary);
-            renderAnalytics(analytics);
+            safeRender(render, 'zgc-live-at-relocate-start',      zgcLiveStart);
+            safeRender(render, 'zgc-live-at-relocate-end',        zgcLiveEnd);
+            safeRender(renderXYScatter, 'zgc-concurrent-phase-durations', zgcConcurrentPhases);
+            safeRender(renderXYScatter, 'zgc-cycle-durations',            zgcCycleDur);
+            safeRender(renderXYScatter, 'zgc-cycle-time-percent',         zgcCyclePct);
+            safeRender(renderXYScatter, 'zgc-pause-time',                 zgcPause);
+            safeRender(renderXYScatter, 'zgc-cycle-durations-and-intervals', zgcCycleDurInt);
+            safeRender(renderXYScatter, 'zgc-system-load',                zgcSysLoad);
+            safeRender(renderSummary, 'summary', summary);
+            try { renderAnalytics(analytics); } catch (e) { console.warn('analytics render failed:', e); }
             // Apply collector-aware filtering before the subsection
             // cascade so a subsection that's empty AND wholly
             // collector-hidden gets the right marker for the rail.
@@ -2297,6 +3159,13 @@
     // chart-cards exist in static markup so they're already in the DOM
     // by the time this runs (script tag is at the end of <body>).
     setupChartFullscreen();
+    setupChartGuideButtons();
+    // Attach the canvas-level click capture once so even pre-render
+    // clicks are handled (no-op when armed === null, anyway).
+    wireCanvasClickHandlers();
+    // Wire the header Clear-guides button. Lives in static markup; the
+    // button hides itself via .visible toggle when guides[] is empty.
+    document.getElementById('guides-clear')?.addEventListener('click', clearAllGuides);
 })();
 </script>
 </body>
