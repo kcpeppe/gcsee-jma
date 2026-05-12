@@ -264,6 +264,7 @@
             line-height: 0;
             padding: 0;
         }
+        .chart-guide-btn.measure { right: 102px; }
         .chart-guide-btn.vrule { right: 70px; }
         .chart-guide-btn.hrule { right: 38px; }
         /* The zoom slider and guide-drop buttons are per-card controls
@@ -1393,6 +1394,15 @@
     const SVG_HRULE = '<svg width="14" height="14" viewBox="0 0 24 24"'
             + ' fill="none" stroke="currentColor" stroke-width="2"'
             + ' stroke-linecap="round"><line x1="3" y1="12" x2="21" y2="12"/></svg>';
+    // Measurement-line icon: diagonal stroke with two filled endpoint
+    // dots. Visually communicates "line between two points" — distinct
+    // from the v/h rulers that span the whole chart.
+    const SVG_MEASURE = '<svg width="14" height="14" viewBox="0 0 24 24"'
+            + ' fill="currentColor" stroke="currentColor" stroke-width="2"'
+            + ' stroke-linecap="round">'
+            + '<line x1="5" y1="19" x2="19" y2="5" fill="none"/>'
+            + '<circle cx="5"  cy="19" r="2.4"/>'
+            + '<circle cx="19" cy="5"  r="2.4"/></svg>';
 
     // Cycling palette so adjacent guides are visually distinct. Picked
     // for contrast against both the white card and the data-point hues
@@ -1611,6 +1621,7 @@
 
     function disarmGuide() {
         armed = null;
+        measureFirstPoint = null; // cancel any in-progress two-click measure
         document.body.classList.remove('guides-armed');
         document.querySelectorAll('.chart-guide-btn.armed')
                 .forEach(b => b.classList.remove('armed'));
@@ -1628,6 +1639,14 @@
      * </ul>
      */
     function onCanvasClick(canvas, ev) {
+        // A click immediately after a drag-with-movement on an endpoint
+        // would otherwise hit-test the same line at the new drag
+        // position and delete it. Swallow exactly one click in that
+        // case.
+        if (measureSuppressNextClick) {
+            measureSuppressNextClick = false;
+            return;
+        }
         const chart = charts[canvas.id];
         if (!chart) return;
         const rect = canvas.getBoundingClientRect();
@@ -1635,6 +1654,30 @@
         const py = ev.clientY - rect.top;
 
         if (armed) {
+            // Measure-line arming uses two clicks: first lays the
+            // start point, second commits the line and disarms.
+            if (armed.orientation === 'measure') {
+                const snap = findNearestPoint(chart, px, py);
+                const xv = snap ? snap.xValue : chart.scales.x.getValueForPixel(px);
+                const yv = snap ? snap.yValue : chart.scales.y.getValueForPixel(py);
+                if (!measureFirstPoint) {
+                    measureFirstPoint = { canvasId: canvas.id, xValue: xv, yValue: yv };
+                    // Stay armed for the second click.
+                } else if (measureFirstPoint.canvasId === canvas.id) {
+                    createMeasureLine(canvas.id,
+                            measureFirstPoint.xValue, measureFirstPoint.yValue,
+                            xv, yv);
+                    measureFirstPoint = null;
+                    disarmGuide();
+                } else {
+                    // User clicked on a different chart between the
+                    // two clicks — start over rather than try to
+                    // stretch a line across two coordinate systems.
+                    measureFirstPoint = { canvasId: canvas.id, xValue: xv, yValue: yv };
+                }
+                return;
+            }
+            // Vertical / horizontal guides — single-click drop.
             const snap = findNearestPoint(chart, px, py);
             if (!snap) {
                 const xVal = chart.scales.x.getValueForPixel(px);
@@ -1649,12 +1692,68 @@
             return;
         }
 
-        // Not armed: clicking a guide line deletes it. Only active on
-        // a fullscreen card — lines aren't drawn in grid view, so we
+        // Not armed: clicking a line deletes it. Only active on a
+        // fullscreen card — lines aren't drawn in grid view, so we
         // shouldn't pick up phantom hits there either.
         if (!isCardFullscreen(canvas)) return;
-        const hit = hitTestGuideOnChart(chart, px, py);
-        if (hit) deleteGuide(hit.id);
+        const guideHit = hitTestGuideOnChart(chart, px, py);
+        if (guideHit) { deleteGuide(guideHit.id); return; }
+        const measureHit = hitTestMeasureOnChart(chart, px, py);
+        if (measureHit && measureHit.endpoint === 'body') {
+            deleteMeasureLine(measureHit.measure.id);
+        }
+    }
+
+    /**
+     * mousedown: starts dragging an endpoint handle if the cursor
+     * lands on one. Only active in fullscreen and only when not in
+     * the armed-arming flow (clicks during arming go through the
+     * normal click path).
+     */
+    function onCanvasMouseDown(canvas, ev) {
+        if (armed) return;
+        if (!isCardFullscreen(canvas)) return;
+        const chart = charts[canvas.id];
+        if (!chart) return;
+        const rect = canvas.getBoundingClientRect();
+        const px = ev.clientX - rect.left;
+        const py = ev.clientY - rect.top;
+        const hit = hitTestMeasureOnChart(chart, px, py);
+        if (hit && (hit.endpoint === 'start' || hit.endpoint === 'end')) {
+            measureDragState = {
+                id: hit.measure.id,
+                endpoint: hit.endpoint,
+                moved: false,
+                canvasId: canvas.id
+            };
+            ev.preventDefault();
+        }
+    }
+
+    /**
+     * mouseup: commits an endpoint drag with a final snap-to-nearest.
+     * If no movement happened between mousedown and mouseup we treat
+     * it as a click on the handle — a no-op (the canvas-level click
+     * handler still gets the event and does nothing because the body
+     * hit-test misses the handle).
+     */
+    function onCanvasMouseUp(canvas, ev) {
+        if (!measureDragState) return;
+        const chart = charts[canvas.id];
+        const m = measureLines.find(x => x.id === measureDragState.id);
+        if (chart && m && measureDragState.moved) {
+            const rect = canvas.getBoundingClientRect();
+            const px = ev.clientX - rect.left;
+            const py = ev.clientY - rect.top;
+            const snap = findNearestPoint(chart, px, py);
+            const xv = snap ? snap.xValue : chart.scales.x.getValueForPixel(px);
+            const yv = snap ? snap.yValue : chart.scales.y.getValueForPixel(py);
+            if (measureDragState.endpoint === 'start') { m.x1 = xv; m.y1 = yv; }
+            else                                       { m.x2 = xv; m.y2 = yv; }
+            chart.draw();
+            measureSuppressNextClick = true;
+        }
+        measureDragState = null;
     }
 
     /**
@@ -1672,9 +1771,35 @@
         const rect = canvas.getBoundingClientRect();
         const px = ev.clientX - rect.left;
         const py = ev.clientY - rect.top;
-        const hit = hitTestGuideOnChart(chart, px, py);
-        if (hit) showGuidePopup(hit, ev);
-        else     hideGuidePopup();
+
+        // Endpoint drag in progress: track the move (no snap during
+        // drag — smooth following), then redraw. Snap happens on
+        // mouseup.
+        if (measureDragState && measureDragState.canvasId === canvas.id) {
+            measureDragState.moved = true;
+            const m = measureLines.find(x => x.id === measureDragState.id);
+            if (m) {
+                const xv = chart.scales.x.getValueForPixel(px);
+                const yv = chart.scales.y.getValueForPixel(py);
+                if (measureDragState.endpoint === 'start') { m.x1 = xv; m.y1 = yv; }
+                else                                       { m.x2 = xv; m.y2 = yv; }
+                chart.draw();
+            }
+            hideGuidePopup();
+            return;
+        }
+
+        // Hover popups: prefer guide hits, then measure-body hits.
+        // Measure-handle hits don't get a popup — the cursor change
+        // is enough of a cue and the popup would block the drag.
+        const guideHit = hitTestGuideOnChart(chart, px, py);
+        if (guideHit) { showGuidePopup(guideHit, ev); return; }
+        const measureHit = hitTestMeasureOnChart(chart, px, py);
+        if (measureHit && measureHit.endpoint === 'body') {
+            showMeasurePopup(measureHit.measure, chart, ev);
+        } else {
+            hideGuidePopup();
+        }
     }
 
     /**
@@ -1765,8 +1890,9 @@
     }
 
     function clearAllGuides() {
-        if (guides.length === 0) return;
+        if (guides.length === 0 && measureLines.length === 0) return;
         guides.length = 0;
+        measureLines.length = 0;
         document.querySelectorAll('.guide-label-tag').forEach(t => t.remove());
         hideGuidePopup();
         disarmGuide();
@@ -1777,17 +1903,207 @@
     function resetGuides() {
         clearAllGuides();
         nextGuideId = 1;
+        nextMeasureId = 1;
     }
+
+    // ===================== Measurement lines =====================
+    //
+    // A measurement line connects two snap points on a single chart and
+    // exposes Δx, Δy, and slope on hover. Lives entirely in pixel space
+    // of one chart (unlike guide lines, which propagate to every
+    // matching-unit chart), so the storage is keyed by canvasId.
+
+    const measureLines = []; // {id, canvasId, x1, y1, x2, y2, color}
+    let nextMeasureId = 1;
+    // Mid-drag state when the user is adjusting an endpoint.
+    let measureDragState = null; // {id, endpoint: 'start'|'end', moved}
+    // After a drag commits, the upcoming click event is suppressed so a
+    // mousedown + tiny mousemove + mouseup doesn't double-delete the
+    // line by also triggering the body-click delete path.
+    let measureSuppressNextClick = false;
+    // First-click waypoint when the user is in two-click "measure"
+    // arming mode. Cleared on completion or disarm.
+    let measureFirstPoint = null; // {canvasId, xValue, yValue}
+
+    const MEASURE_COLORS = [
+        '#0d6efd', '#e53935', '#198754', '#fd7e14', '#6f42c1', '#20c997'
+    ];
+
+    /**
+     * Draws every measurement line that belongs to the current chart,
+     * but only when the card is in fullscreen — same gate as guides.
+     * Solid stroke (distinct from the dashed guide lines) plus filled
+     * endpoint dots that double as drag handles for the user.
+     */
+    const MeasureLinesPlugin = {
+        id: 'gcseeMeasureLines',
+        afterDatasetsDraw(chart) {
+            if (!isCardFullscreen(chart.canvas)) return;
+            const ctx = chart.ctx;
+            const area = chart.chartArea;
+            if (!area || measureLines.length === 0) return;
+            ctx.save();
+            ctx.setLineDash([]);
+            ctx.lineWidth = 2;
+            for (const m of measureLines) {
+                if (m.canvasId !== chart.canvas.id) continue;
+                const px1 = chart.scales.x.getPixelForValue(m.x1);
+                const py1 = chart.scales.y.getPixelForValue(m.y1);
+                const px2 = chart.scales.x.getPixelForValue(m.x2);
+                const py2 = chart.scales.y.getPixelForValue(m.y2);
+                if (![px1, py1, px2, py2].every(isFinite)) continue;
+                ctx.strokeStyle = m.color;
+                ctx.beginPath();
+                ctx.moveTo(px1, py1);
+                ctx.lineTo(px2, py2);
+                ctx.stroke();
+                // Endpoint handles: filled circle with a white ring so
+                // they read clearly against any dataset colour.
+                ctx.fillStyle = m.color;
+                for (const [hx, hy] of [[px1, py1], [px2, py2]]) {
+                    ctx.beginPath();
+                    ctx.arc(hx, hy, 5, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.lineWidth = 1.5;
+                    ctx.strokeStyle = '#ffffff';
+                    ctx.stroke();
+                    ctx.lineWidth = 2;
+                }
+            }
+            ctx.restore();
+        }
+    };
+    if (typeof Chart !== 'undefined' && !window.__gcseeMeasurePluginRegistered) {
+        Chart.register(MeasureLinesPlugin);
+        window.__gcseeMeasurePluginRegistered = true;
+    }
+
+    /**
+     * Distance from a point to a line segment in 2-D pixel space.
+     * Standard projection-with-clamp formula. Returns ∞ for a
+     * zero-length segment.
+     */
+    function pointToSegmentDistance(px, py, x1, y1, x2, y2) {
+        const dx = x2 - x1, dy = y2 - y1;
+        const len2 = dx * dx + dy * dy;
+        if (len2 === 0) return Math.hypot(px - x1, py - y1);
+        let t = ((px - x1) * dx + (py - y1) * dy) / len2;
+        t = Math.max(0, Math.min(1, t));
+        return Math.hypot(px - (x1 + t * dx), py - (y1 + t * dy));
+    }
+
+    /**
+     * Hit-test a click / hover at (px, py) on the chart's measurement
+     * lines. Returns the first hit, with the endpoint that was hit:
+     * 'start' or 'end' for handle hits (priority over body), 'body'
+     * for a hit on the line segment itself, null on miss.
+     */
+    function hitTestMeasureOnChart(chart, px, py) {
+        const HANDLE_R = 8;
+        const LINE_TOL = 5;
+        for (const m of measureLines) {
+            if (m.canvasId !== chart.canvas.id) continue;
+            const px1 = chart.scales.x.getPixelForValue(m.x1);
+            const py1 = chart.scales.y.getPixelForValue(m.y1);
+            const px2 = chart.scales.x.getPixelForValue(m.x2);
+            const py2 = chart.scales.y.getPixelForValue(m.y2);
+            if (![px1, py1, px2, py2].every(isFinite)) continue;
+            if (Math.hypot(px - px1, py - py1) <= HANDLE_R) {
+                return { measure: m, endpoint: 'start' };
+            }
+            if (Math.hypot(px - px2, py - py2) <= HANDLE_R) {
+                return { measure: m, endpoint: 'end' };
+            }
+            if (pointToSegmentDistance(px, py, px1, py1, px2, py2) <= LINE_TOL) {
+                return { measure: m, endpoint: 'body' };
+            }
+        }
+        return null;
+    }
+
+    function createMeasureLine(canvasId, x1, y1, x2, y2) {
+        const id = `measure-${nextMeasureId++}`;
+        const color = MEASURE_COLORS[(measureLines.length) % MEASURE_COLORS.length];
+        measureLines.push({ id, canvasId, x1, y1, x2, y2, color });
+        const chart = charts[canvasId];
+        if (chart) chart.draw();
+        updateClearGuidesButton();
+    }
+
+    function deleteMeasureLine(id) {
+        const idx = measureLines.findIndex(m => m.id === id);
+        if (idx < 0) return;
+        const canvasId = measureLines[idx].canvasId;
+        measureLines.splice(idx, 1);
+        hideGuidePopup();
+        const chart = charts[canvasId];
+        if (chart) chart.draw();
+        updateClearGuidesButton();
+    }
+
+    /**
+     * Render the hover popup for a measurement line: shows Δx, Δy, and
+     * slope using the host chart's own axis labels / units. Pure
+     * arithmetic on the stored data values; format follows the same
+     * conventions as the guide popup so the page reads consistently.
+     */
+    function showMeasurePopup(m, chart, ev) {
+        const popup = document.getElementById('guide-popup');
+        if (!popup) return;
+        const meta = chart.$guideMeta || {};
+        const xLabel = meta.xAxisLabel || 'x';
+        const yLabel = meta.yAxisLabel || 'y';
+        const xUnit  = meta.xAxisLabel;
+        const yUnit  = meta.yUnit;
+        const dx = m.x2 - m.x1;
+        const dy = m.y2 - m.y1;
+        const dxText = formatGuideValue(dx, xUnit);
+        const dyText = formatGuideValue(dy, yUnit);
+        let slopeText;
+        if (dx === 0) {
+            slopeText = '∞ (vertical)';
+        } else {
+            const slope = dy / dx;
+            // Pretty unit: "MB/s" reads better than "MB/time (s)";
+            // strip the parenthetical unit-of-time tag when present.
+            let denom = xUnit || '';
+            const m1 = denom.match(/\(([^)]+)\)/);
+            if (m1) denom = m1[1];
+            const num = yUnit || '';
+            const unitStr = (num || denom)
+                    ? `${num}${num && denom ? '/' : ''}${denom}`
+                    : '';
+            slopeText = `${slope.toFixed(3)}${unitStr ? ' ' + unitStr : ''}`;
+        }
+        popup.innerHTML =
+                `<div class="guide-popup-label" style="color:${m.color}">Measurement</div>` +
+                `<div class="guide-popup-meta">From: ${escapeHtml(xLabel)}=${formatGuideValue(m.x1, xUnit)}, `
+                        + `${escapeHtml(yLabel)}=${formatGuideValue(m.y1, yUnit)}</div>` +
+                `<div class="guide-popup-meta">To:   ${escapeHtml(xLabel)}=${formatGuideValue(m.x2, xUnit)}, `
+                        + `${escapeHtml(yLabel)}=${formatGuideValue(m.y2, yUnit)}</div>` +
+                `<div class="guide-popup-meta">Δ ${escapeHtml(xLabel)}: ${dxText}</div>` +
+                `<div class="guide-popup-meta">Δ ${escapeHtml(yLabel)}: ${dyText}</div>` +
+                `<div class="guide-popup-meta">Slope: ${escapeHtml(slopeText)}</div>` +
+                `<div class="guide-popup-meta">Click body to delete · drag handles to adjust</div>`;
+        popup.style.display = 'block';
+        positionGuidePopup(ev);
+    }
+
+    // ===================== /Measurement lines ====================
 
     // ---------- Per-card guide buttons ----------
 
     function setupChartGuideButtons() {
         document.querySelectorAll('.chart-card').forEach(card => {
             if (card.querySelector('.chart-guide-btn')) return;
+            const mbtn = makeGuideBtn('measure',
+                    'Place measurement line (Δx, Δy, slope)',
+                    SVG_MEASURE, 'measure');
             const vbtn = makeGuideBtn('vrule',
                     'Drop vertical reference line', SVG_VRULE, 'vertical');
             const hbtn = makeGuideBtn('hrule',
                     'Drop horizontal reference line', SVG_HRULE, 'horizontal');
+            card.appendChild(mbtn);
             card.appendChild(vbtn);
             card.appendChild(hbtn);
         });
@@ -1819,9 +2135,20 @@
         document.querySelectorAll('.chart-card canvas').forEach(canvas => {
             if (canvas.dataset.guideClickWired === '1') return;
             canvas.dataset.guideClickWired = '1';
-            canvas.addEventListener('click',     ev => onCanvasClick(canvas, ev));
-            canvas.addEventListener('mousemove', ev => onCanvasMouseMove(canvas, ev));
-            canvas.addEventListener('mouseleave', () => hideGuidePopup());
+            canvas.addEventListener('click',      ev => onCanvasClick(canvas, ev));
+            canvas.addEventListener('mousemove',  ev => onCanvasMouseMove(canvas, ev));
+            canvas.addEventListener('mousedown',  ev => onCanvasMouseDown(canvas, ev));
+            canvas.addEventListener('mouseup',    ev => onCanvasMouseUp(canvas, ev));
+            canvas.addEventListener('mouseleave', () => {
+                hideGuidePopup();
+                // If a drag was started but the user dragged off the
+                // canvas, end it cleanly without committing — the line
+                // keeps its pre-drag values via the natural redraw.
+                if (measureDragState && measureDragState.canvasId === canvas.id
+                        && !measureDragState.moved) {
+                    measureDragState = null;
+                }
+            });
         });
         document.addEventListener('keydown', e => {
             if (e.key === 'Escape' && armed) disarmGuide();
