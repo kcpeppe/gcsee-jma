@@ -9,6 +9,39 @@ generational ZGC logs. Built on top of the GCSee parser.
 
 Two paths, pick whichever fits your environment.
 
+### Run with JBang
+
+Requires [JBang](https://www.jbang.dev/) (which will fetch the right
+JDK automatically — no manual Java install needed).
+
+```sh
+jbang gcsee-jma@kcpeppe/gcsee-jma
+```
+
+Open <http://localhost:8080> once you see
+`Listening on: http://0.0.0.0:8080`. `Ctrl-C` to stop.
+
+To avoid typing the full alias every time, install it as a local
+command:
+
+```sh
+jbang app install gcsee-jma@kcpeppe/gcsee-jma
+```
+
+After that, just run:
+
+```sh
+gcsee-jma
+```
+
+To override the port or bind address, pass JVM properties before the
+alias (or command name):
+
+```sh
+jbang -Dquarkus.http.port=9000 -Dquarkus.http.host=127.0.0.1 \
+  gcsee-jma@kcpeppe/gcsee-jma
+```
+
 ### Run the JAR directly
 
 Requires **Java 25** or newer (any vendor — Temurin, Oracle, Azul, …).
