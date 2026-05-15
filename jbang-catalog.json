@@ -1,0 +1,7 @@
+{
+  "aliases": {
+    "gcsee-jma": {
+      "script-ref": "https://github.com/kcpeppe/gcsee-jma/releases/download/v0.1.0/gcsee-jma-0.1.0.jar"
+    }
+  }
+}
